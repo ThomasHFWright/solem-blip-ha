@@ -22,13 +22,13 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import selector
 
 from solem_blip_ble import IrrigationProgram, SolemConnectionError
-from solem_blip_ble.client_v2 import StatelessSolemClient as SolemClient
 
 from .bluetooth import (
     async_get_connectable_device,
     async_is_device_discovered,
     async_scan_devices,
 )
+from .client_factory import create_solem_client
 from .const import (
     BLUETOOTH_DEFAULT_TIMEOUT,
     BLUETOOTH_MAX_TIMEOUT,
@@ -45,6 +45,7 @@ from .const import (
     MIN_NUM_STATIONS,
     MIN_SCAN_INTERVAL,
     NUM_STATIONS,
+    PERSISTENT_CONNECTION,
     PROGRAM_LABELS,
     SOLEM_API_MOCK,
 )
@@ -98,9 +99,11 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
     if _resolve_ble_device() is None:
         raise CannotConnect
 
-    api = SolemClient(
-        address,
-        CONFIG_FLOW_BLUETOOTH_TIMEOUT,
+    api = create_solem_client(
+        persistent=False,
+        scan_interval=DEFAULT_SCAN_INTERVAL,
+        mac_address=address,
+        bluetooth_timeout=CONFIG_FLOW_BLUETOOTH_TIMEOUT,
         ble_device_resolver=_resolve_ble_device,
     )
 
@@ -359,6 +362,14 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
                 ): vol.All(
                     vol.Coerce(int),
                     vol.Clamp(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL),
+                ),
+                vol.Required(
+                    PERSISTENT_CONNECTION,
+                    default=options.get(PERSISTENT_CONNECTION, False),
+                ): selector(
+                    {
+                        "boolean": {},
+                    }
                 ),
                 vol.Required(
                     BLUETOOTH_TIMEOUT,

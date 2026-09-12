@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
@@ -14,7 +14,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from solem_blip_ble import IrrigationProgram
-from solem_blip_ble.client_v2 import StatelessSolemClient as SolemClient
+
+from .client_factory import (
+    PersistentSolemClient,
+    build_solem_client,
+)
 
 from .config_entry import MyConfigEntry
 from .const import (
@@ -27,6 +31,8 @@ from .const import (
     DOMAIN,
     IRRIGATION_CONFIG_UPDATE_INTERVAL,
     NUM_STATIONS,
+    PERSISTENT_CONNECTION,
+    PERSISTENT_DISCONNECT_TIMEOUT,
     PROGRAM_LABELS,
     SOLEM_API_MOCK,
 )
@@ -108,8 +114,9 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._station_names_retry_after = 0.0
         self.stations = self._build_stations()
 
-        self.api = SolemClient(
-            self.controller_mac_address,
+        self.api = build_solem_client(
+            config_entry,
+            mac_address=self.controller_mac_address,
             bluetooth_timeout=self.bluetooth_timeout,
             mock=self.solem_api_mock,
             max_station_num=self.num_stations,
@@ -117,6 +124,7 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 hass, self.controller_mac_address
             ),
         )
+        self.persistent_connection = isinstance(self.api, PersistentSolemClient)
 
         self.irrigation_stop_event = asyncio.Event()
         self._irrigation_active = False
@@ -187,15 +195,29 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     async def async_shutdown(self) -> None:
         """Tear down coordinator tasks when the integration unloads.
 
-        The v2 client holds no BLE session between operations, so there is
-        nothing to disconnect here; any in-flight operation closes its own
-        connection when the monitor task is cancelled below.
+        The irrigation monitor task is cancelled first so no in-flight
+        operation races the teardown. With ``persistent_connection`` enabled
+        the client holds the BLE link between polls, so it is explicitly
+        disconnected here (bounded, so a resisting controller cannot stall
+        unload); the stateless v2 client holds no BLE session between
+        operations and closes its own connection when the monitor task is
+        cancelled.
         """
         self.irrigation_stop_event.set()
         task = self._irrigation_monitor_task
         if task is not None and not task.done():
             task.cancel()
         await self._await_irrigation_monitor_task()
+        if self.persistent_connection:
+            try:
+                async with asyncio.timeout(PERSISTENT_DISCONNECT_TIMEOUT):
+                    await cast("PersistentSolemClient", self.api).disconnect()
+            except TimeoutError:
+                _LOGGER.warning(
+                    "%s - Persistent BLE disconnect timed out during shutdown; "
+                    "continuing teardown",
+                    self.controller_mac_address,
+                )
         self._clear_irrigation_idle_state()
         await self.schedule_coordinator.async_shutdown()
 

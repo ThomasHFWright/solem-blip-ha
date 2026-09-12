@@ -35,7 +35,7 @@ async def test_async_init_does_not_block_on_ble_io(
     mock_solem_client.mock = False
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ):
         coordinator = SolemCoordinator(hass, config_entry)
@@ -59,7 +59,7 @@ async def test_remaining_time_sensor_reports_minutes(
 ) -> None:
     """Remaining-time descriptors expose rounded-up minutes, not raw seconds."""
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ):
         coordinator = SolemCoordinator(hass, mock_config_entry)
@@ -94,7 +94,7 @@ async def test_async_update_data_raises_update_failed_on_ble_error(
     mock_solem_client.get_status.side_effect = APIConnectionError("Offline")
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ):
         coordinator = SolemCoordinator(hass, mock_config_entry)
@@ -116,7 +116,7 @@ async def test_async_update_data_success_poll_has_no_teardown(
     drives connection lifecycle, so there is nothing to release after a poll.
     """
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ):
         coordinator = SolemCoordinator(hass, mock_config_entry)
@@ -134,7 +134,7 @@ async def test_async_update_data_failed_poll_is_wrapped(
     """A failing poll raises UpdateFailed; teardown is the client's own close."""
     mock_solem_client.get_status.side_effect = APIConnectionError("Offline")
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ):
         coordinator = SolemCoordinator(hass, mock_config_entry)
@@ -160,7 +160,7 @@ class TestEntitySetupMetadata:
         from custom_components.solem_blip.const import DOMAIN
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -200,7 +200,7 @@ class TestEntitySetupMetadata:
         mock_solem_client.get_station_names.side_effect = asyncio.TimeoutError
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -239,7 +239,7 @@ class TestEntitySetupMetadata:
         mock_solem_client.get_firmware_version.side_effect = asyncio.TimeoutError
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -265,7 +265,7 @@ class TestEntitySetupMetadata:
         mock_solem_client.get_station_names.side_effect = asyncio.TimeoutError
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -302,7 +302,7 @@ async def test_set_time_runs_on_first_poll(
     mock_solem_client.mock = False
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -335,7 +335,7 @@ async def test_set_time_throttled(
     mock_solem_client.mock = False
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -367,7 +367,7 @@ async def test_set_time_retriggers_after_cycle_recovery(
     mock_solem_client.mock = False
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -400,7 +400,7 @@ async def test_irrigation_config_failures_are_cooled_down(
     mock_solem_client.get_irrigation_config.side_effect = asyncio.TimeoutError
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -422,7 +422,7 @@ async def test_status_poll_does_not_read_irrigation_config(
 ) -> None:
     """Slow schedule reads do not delay the status coordinator."""
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -442,7 +442,7 @@ async def test_irrigation_config_read_is_deferred_while_watering(
 ) -> None:
     """Schedule coordinator skips BLE reads during manual irrigation."""
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -463,7 +463,7 @@ async def test_status_poll_runs_during_manual_irrigation(
 ) -> None:
     """Device-initiated program runs still receive status polls during HA manual irrigation."""
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -493,7 +493,7 @@ async def test_station_names_slow_read_uses_extended_timeout(
     mock_solem_client.get_station_names = slow_names
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -520,7 +520,7 @@ async def test_station_names_partial_reads_merge(
     mock_solem_client.get_station_names = partial_names
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -542,7 +542,7 @@ async def test_two_consecutive_status_polls(
 ) -> None:
     """Two status polls both call get_status and advance last poll timestamp."""
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -571,7 +571,7 @@ async def test_metadata_deferred_until_heavy_read_gate(
     mock_config_entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -599,7 +599,7 @@ async def test_schedule_refresh_does_not_call_main_async_set_updated_data(
 ) -> None:
     """Schedule refresh publishes descriptors without resetting the main poll timer."""
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -627,7 +627,7 @@ async def test_schedule_first_refresh_waits_for_heavy_read_gate(
     mock_config_entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -677,7 +677,7 @@ async def test_schedule_first_refresh_reads_metadata_before_config(
     mock_config_entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -705,7 +705,7 @@ async def test_first_status_poll_opens_schedule_gate(
     mock_config_entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -729,7 +729,7 @@ async def test_schedule_first_refresh_cancelled_on_entry_shutdown(
     mock_config_entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",

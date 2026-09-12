@@ -32,6 +32,7 @@ from custom_components.solem_blip.const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     NUM_STATIONS,
+    PERSISTENT_CONNECTION,
     SOLEM_API_MOCK,
 )
 from solem_blip_ble import SolemConnectionError
@@ -87,7 +88,7 @@ async def test_validate_input_connects_successfully(hass: HomeAssistant) -> None
         "custom_components.solem_blip.config_flow.async_get_connectable_device",
         return_value=MagicMock(),
     ), patch(
-        "custom_components.solem_blip.config_flow.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_api,
     ):
         result = await validate_input(
@@ -114,7 +115,7 @@ async def test_validate_input_retries_busy_slots(hass: HomeAssistant) -> None:
         "custom_components.solem_blip.config_flow.async_get_connectable_device",
         return_value=MagicMock(),
     ), patch(
-        "custom_components.solem_blip.config_flow.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_api,
     ), patch(
         "custom_components.solem_blip.config_flow.asyncio.sleep",
@@ -143,7 +144,7 @@ async def test_validate_input_slots_with_discovery_proceeds(
         "custom_components.solem_blip.config_flow.async_get_connectable_device",
         return_value=MagicMock(),
     ), patch(
-        "custom_components.solem_blip.config_flow.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_api,
     ), patch(
         "custom_components.solem_blip.config_flow.async_is_device_discovered",
@@ -171,7 +172,7 @@ async def test_validate_input_slots_without_discovery_raises(
         "custom_components.solem_blip.config_flow.async_get_connectable_device",
         return_value=MagicMock(),
     ), patch(
-        "custom_components.solem_blip.config_flow.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_api,
     ), patch(
         "custom_components.solem_blip.config_flow.async_is_device_discovered",
@@ -194,7 +195,7 @@ async def test_validate_input_generic_connect_error(hass: HomeAssistant) -> None
         "custom_components.solem_blip.config_flow.async_get_connectable_device",
         return_value=MagicMock(),
     ), patch(
-        "custom_components.solem_blip.config_flow.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_api,
     ):
         with pytest.raises(CannotConnect):
@@ -343,7 +344,7 @@ async def test_validate_input_raises_when_no_connect_attempts(
         "custom_components.solem_blip.config_flow.async_get_connectable_device",
         return_value=MagicMock(),
     ), patch(
-        "custom_components.solem_blip.config_flow.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_api,
     ), patch(
         "custom_components.solem_blip.config_flow.CONFIG_FLOW_CONNECT_RETRIES",
@@ -505,6 +506,59 @@ async def test_options_flow_settings_updates_settings(
 
     assert result["type"] == "create_entry"
     assert result["data"][CONF_SCAN_INTERVAL] == 90
+
+
+@pytest.mark.asyncio
+async def test_options_flow_settings_persists_persistent_connection(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Options flow settings path shows and persists persistent_connection."""
+    mock_config_entry.add_to_hass(hass)
+    handler = SolemOptionsFlowHandler()
+    with patch.object(
+        SolemOptionsFlowHandler,
+        "config_entry",
+        new_callable=PropertyMock,
+        return_value=mock_config_entry,
+    ):
+        shown = await handler.async_step_settings()
+        assert PERSISTENT_CONNECTION in shown["data_schema"].schema
+
+        result = await handler.async_step_settings(
+            {
+                CONF_SCAN_INTERVAL: 90,
+                BLUETOOTH_TIMEOUT: 35,
+                SOLEM_API_MOCK: "false",
+                PERSISTENT_CONNECTION: True,
+            }
+        )
+
+    assert result["type"] == "create_entry"
+    assert result["data"][PERSISTENT_CONNECTION] is True
+
+
+@pytest.mark.asyncio
+async def test_options_flow_settings_persistent_connection_default_off(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """persistent_connection defaults to False when not configured."""
+    mock_config_entry.add_to_hass(hass)
+    handler = SolemOptionsFlowHandler()
+    with patch.object(
+        SolemOptionsFlowHandler,
+        "config_entry",
+        new_callable=PropertyMock,
+        return_value=mock_config_entry,
+    ):
+        result = await handler.async_step_settings()
+
+    assert result["type"] == "form"
+    marker = next(
+        key
+        for key in result["data_schema"].schema
+        if getattr(key, "schema", None) == PERSISTENT_CONNECTION
+    )
+    assert marker.default() is False
 
 
 @pytest.mark.asyncio

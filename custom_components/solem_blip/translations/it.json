@@ -53,6 +53,7 @@
       "settings": {
         "data": {
           "scan_interval": "Intervallo di scansione (secondi)",
+          "persistent_connection": "Mantieni la connessione BLE tra i rilevamenti (consigliato per controller instabili)",
           "bluetooth_timeout": "Timeout Bluetooth (secondi)",
           "solem_api_mock": "Simula API Solem (debug)"
         },

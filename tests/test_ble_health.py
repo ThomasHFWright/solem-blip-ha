@@ -122,7 +122,7 @@ async def test_metadata_failures_emit_one_warning_and_debug_detail(
     mock_solem_client.get_station_names.side_effect = asyncio.TimeoutError
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -162,7 +162,7 @@ async def test_status_failure_emits_one_warning(
     mock_solem_client.get_status.side_effect = asyncio.TimeoutError
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -190,7 +190,7 @@ async def test_healthy_poll_resets_streak_after_status_failure(
     mock_solem_client.get_status.side_effect = asyncio.TimeoutError
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
