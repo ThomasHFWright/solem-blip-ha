@@ -45,7 +45,7 @@ class TestStartStopButtonBehavior:
     ) -> None:
         """Station button calls coordinator.start_irrigation."""
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -72,7 +72,7 @@ class TestStartStopButtonBehavior:
     ) -> None:
         """Stop button calls coordinator.stop_irrigation."""
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -95,7 +95,7 @@ class TestStartStopButtonBehavior:
     ) -> None:
         """Program button calls coordinator.start_program."""
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -137,7 +137,7 @@ class TestStartStopButtonBehavior:
         )
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -168,7 +168,7 @@ class TestStartStopButtonBehavior:
         mock_client.connect = AsyncMock()
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -200,7 +200,7 @@ class TestIrrigationMonitorLifecycle:
         mock_client.get_status = AsyncMock(return_value=watering_status())
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -237,7 +237,7 @@ class TestIrrigationMonitorLifecycle:
         mock_client.get_status = AsyncMock(return_value=watering_status())
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -278,7 +278,7 @@ class TestIrrigationMonitorLifecycle:
         mock_client.connect = AsyncMock()
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -319,7 +319,7 @@ class TestIrrigationMonitorLifecycle:
         mock_client.get_status = AsyncMock(return_value=watering_status())
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -362,7 +362,7 @@ class TestIrrigationMonitorLifecycle:
         mock_client.get_status = AsyncMock(return_value=watering_status())
 
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",

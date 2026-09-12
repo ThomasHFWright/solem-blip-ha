@@ -31,7 +31,7 @@ async def test_stop_irrigation_connection_error(
     )
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -55,7 +55,7 @@ async def test_start_irrigation_unexpected_error_cleans_up(
     )
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -81,7 +81,7 @@ async def test_turn_controller_on_connection_error(
     mock_client.turn_on = AsyncMock(side_effect=APIConnectionError("offline"))
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -105,7 +105,7 @@ async def test_turn_controller_off_connection_error(
     )
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -127,7 +127,7 @@ async def test_monitor_irrigation_handles_status_poll_errors(
     mock_client.get_status = AsyncMock(side_effect=APIConnectionError("offline"))
 
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",

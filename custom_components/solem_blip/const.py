@@ -3,7 +3,7 @@
 DOMAIN = "solem_blip"
 V5_SERVICE_UUID = "108b0001-eab5-bc09-d0ea-0b8f467ce8ee"
 
-DEFAULT_SCAN_INTERVAL = 60
+DEFAULT_SCAN_INTERVAL = 120
 MIN_SCAN_INTERVAL = 10
 MAX_SCAN_INTERVAL = 3600
 
@@ -38,6 +38,12 @@ SET_TIME_MIN_INTERVAL = 24 * 60 * 60
 HEAVY_READ_DEFER_SECONDS = 60
 
 SOLEM_API_MOCK = "solem_api_mock"
+PERSISTENT_CONNECTION = "persistent_connection"
+# While the persistent client holds the BLE link between polls, hand the radio
+# back at 75% of the scan interval so an overlapping poll never stalls.
+PERSISTENT_IDLE_RELEASE_FRACTION = 0.75
+# Upper bound for the bounded disconnect during coordinator shutdown.
+PERSISTENT_DISCONNECT_TIMEOUT = 5
 DEFAULT_MANUAL_DURATION = 10
 DEFAULT_CONTROLLER_OFF_DAYS = 1
 MAX_CONTROLLER_OFF_DAYS = 15

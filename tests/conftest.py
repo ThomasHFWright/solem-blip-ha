@@ -141,7 +141,7 @@ async def coordinator(
 ) -> SolemCoordinator:
     """Create a coordinator with mocked dependencies."""
     with patch(
-        "custom_components.solem_blip.coordinator.SolemClient",
+        "custom_components.solem_blip.client_factory.StatelessSolemClient",
         return_value=mock_solem_client,
     ), patch(
         "custom_components.solem_blip.bluetooth.async_get_connectable_device",

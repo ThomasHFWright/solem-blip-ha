@@ -28,7 +28,7 @@ class TestEntitySetup:
     ) -> None:
         """Sensors/buttons are created for the configured number of stations."""
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -61,7 +61,7 @@ class TestEntitySetup:
     ) -> None:
         """Battery, battery voltage, and battery low sensors are present."""
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -95,7 +95,7 @@ class TestEntitySetup:
     ) -> None:
         """Controller buttons and number controls are present."""
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -130,7 +130,7 @@ class TestEntitySetup:
     ) -> None:
         """Program schedule sensors are present after config read."""
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
@@ -179,7 +179,7 @@ class TestEntitySetup:
     ) -> None:
         """Last time sync diagnostic is present and unknown until sync."""
         with patch(
-            "custom_components.solem_blip.coordinator.SolemClient",
+            "custom_components.solem_blip.client_factory.StatelessSolemClient",
             return_value=mock_solem_client,
         ), patch(
             "custom_components.solem_blip.bluetooth.async_get_connectable_device",
