@@ -12,6 +12,7 @@ from homeassistant.const import CONF_SCAN_INTERVAL
 from .const import (
     DEFAULT_SCAN_INTERVAL,
     PERSISTENT_CONNECTION,
+    PERSISTENT_HOLD_LINK,
     PERSISTENT_IDLE_RELEASE_FRACTION,
 )
 
@@ -34,19 +35,26 @@ def idle_release_seconds(scan_interval: int) -> int:
 
 
 def create_solem_client(
-    persistent: bool, scan_interval: int, **client_kwargs: Any
+    persistent: bool,
+    scan_interval: int,
+    hold_link: bool = False,
+    **client_kwargs: Any,
 ) -> StatelessSolemClient:
     """Select and build the BLE client for the requested connection mode.
 
     With ``persistent`` enabled, a :class:`PersistentSolemClient` is returned
-    (one BLE connection held across operations, released after 75% of the
-    scan interval when idle); otherwise the stateless v2 client that
-    connects per operation.
+    (one BLE connection held across operations); with ``hold_link`` it is
+    held indefinitely (no idle release), otherwise it is released after 75%
+    of the scan interval when idle. Without ``persistent`` the stateless v2
+    client that connects per operation is returned.
     """
     if not persistent:
         return StatelessSolemClient(**client_kwargs)
+    idle_release = (
+        None if hold_link else idle_release_seconds(scan_interval)
+    )
     return PersistentSolemClient(
-        idle_release_seconds=idle_release_seconds(scan_interval),
+        idle_release_seconds=idle_release,
         **client_kwargs,
     )
 
@@ -60,5 +68,6 @@ def build_solem_client(
     return create_solem_client(
         bool(options.get(PERSISTENT_CONNECTION, False)),
         int(options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)),
+        bool(options.get(PERSISTENT_HOLD_LINK, False)),
         **client_kwargs,
     )

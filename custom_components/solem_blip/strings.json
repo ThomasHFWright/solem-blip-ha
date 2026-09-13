@@ -54,6 +54,7 @@
         "data": {
           "scan_interval": "Scan interval (seconds)",
           "persistent_connection": "Hold the BLE connection between polls (recommended for unstable controllers)",
+          "persistent_hold_link": "Hold the BLE link open indefinitely (no idle release). Most stable on churn-sensitive controllers, but the phone app cannot connect while the link is held.",
           "bluetooth_timeout": "Bluetooth timeout (seconds)",
           "solem_api_mock": "Mock Solem API for debug"
         },
