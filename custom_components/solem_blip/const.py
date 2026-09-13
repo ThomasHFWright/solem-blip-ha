@@ -39,6 +39,10 @@ HEAVY_READ_DEFER_SECONDS = 60
 
 SOLEM_API_MOCK = "solem_api_mock"
 PERSISTENT_CONNECTION = "persistent_connection"
+# Hold the BLE link open indefinitely while persistent mode is enabled
+# (no idle release). Maximizes connection stability on churn-sensitive
+# controllers; the phone app cannot connect while the link is held.
+PERSISTENT_HOLD_LINK = "persistent_hold_link"
 # While the persistent client holds the BLE link between polls, hand the radio
 # back at 75% of the scan interval so an overlapping poll never stalls.
 PERSISTENT_IDLE_RELEASE_FRACTION = 0.75

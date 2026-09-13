@@ -46,6 +46,7 @@ from .const import (
     MIN_SCAN_INTERVAL,
     NUM_STATIONS,
     PERSISTENT_CONNECTION,
+    PERSISTENT_HOLD_LINK,
     PROGRAM_LABELS,
     SOLEM_API_MOCK,
 )
@@ -366,6 +367,14 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
                 vol.Required(
                     PERSISTENT_CONNECTION,
                     default=options.get(PERSISTENT_CONNECTION, False),
+                ): selector(
+                    {
+                        "boolean": {},
+                    }
+                ),
+                vol.Required(
+                    PERSISTENT_HOLD_LINK,
+                    default=options.get(PERSISTENT_HOLD_LINK, False),
                 ): selector(
                     {
                         "boolean": {},

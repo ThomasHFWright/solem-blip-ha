@@ -25,6 +25,7 @@ from custom_components.solem_blip.const import (
     DOMAIN,
     NUM_STATIONS,
     PERSISTENT_CONNECTION,
+    PERSISTENT_HOLD_LINK,
     SOLEM_API_MOCK,
 )
 from custom_components.solem_blip.coordinator import SolemCoordinator
@@ -90,6 +91,32 @@ def test_build_solem_client_reads_entry_options_on(
     )
     assert isinstance(client, PersistentSolemClient)
     assert client.idle_release_seconds == round(DEFAULT_SCAN_INTERVAL * 0.75)
+
+
+def test_create_solem_client_hold_link_disables_idle_release() -> None:
+    """hold_link=True holds the persistent link indefinitely (None idle release)."""
+    client = create_solem_client(
+        True, 300, hold_link=True, mac_address="AA:BB:CC:DD:EE:FF"
+    )
+    assert isinstance(client, PersistentSolemClient)
+    assert client.idle_release_seconds is None
+
+
+def test_build_solem_client_reads_hold_link_option(
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """persistent_hold_link=True maps to an indefinite hold (None idle release)."""
+    entry = _entry_with_options(
+        mock_config_entry,
+        {PERSISTENT_CONNECTION: True, PERSISTENT_HOLD_LINK: True},
+    )
+    client = build_solem_client(
+        entry,
+        mac_address="AA:BB:CC:DD:EE:FF",
+        bluetooth_timeout=BLUETOOTH_DEFAULT_TIMEOUT,
+    )
+    assert isinstance(client, PersistentSolemClient)
+    assert client.idle_release_seconds is None
 
 
 @pytest.fixture

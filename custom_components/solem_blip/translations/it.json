@@ -54,6 +54,7 @@
         "data": {
           "scan_interval": "Intervallo di scansione (secondi)",
           "persistent_connection": "Mantieni la connessione BLE tra i rilevamenti (consigliato per controller instabili)",
+          "persistent_hold_link": "Mantieni il collegamento BLE aperto indefinitamente (nessun rilascio a riposo). Massima stabilità sui controller sensibili al churn, ma l’app per telefono non può connettersi mentre il collegamento è attivo.",
           "bluetooth_timeout": "Timeout Bluetooth (secondi)",
           "solem_api_mock": "Simula API Solem (debug)"
         },
