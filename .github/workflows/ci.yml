@@ -144,26 +144,6 @@ jobs:
           UV_PYTHON: "3.14"
         run: uv run pytest -v
 
-      - name: Generate coverage badge
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          # coverage-badge imports pkg_resources; setuptools 82+ removes it on Python 3.14
-          pip install "setuptools>=69,<81" coverage-badge
-          coverage-badge -f -o badges/coverage.svg
-
-      - name: Commit coverage badge
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          if [ -z "$(git status --porcelain -- badges/coverage.svg)" ]; then
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add badges/coverage.svg
-          git commit -m "chore: update coverage badge"
-          git push origin HEAD:${GITHUB_REF_NAME}
-
   mypy:
     name: Run mypy
     runs-on: ubuntu-latest
