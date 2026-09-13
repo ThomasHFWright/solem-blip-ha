@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import logging
+
 import pytest
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -19,6 +21,49 @@ from custom_components.solem_blip.const import (
     SOLEM_API_MOCK,
 )
 from custom_components.solem_blip.coordinator import SolemCoordinator
+
+_DEPRECATION_MARKERS = (
+    "which is deprecated",
+    "will stop working in Home Assistant",
+)
+
+
+@pytest.fixture(autouse=True)
+def fail_on_ha_deprecation_report(caplog: pytest.LogCaptureFixture) -> object:
+    """Fail any test whose code path triggers an HA integration-report deprecation.
+
+    HA's ``helpers.frame.report_usage`` only LOGS deprecations for custom
+    integrations (core integrations get an instant error), and it does not use
+    the ``warnings`` machinery, so ``-W error``/``filterwarnings`` cannot see
+    it. This fixture asserts on the captured logs instead: a warning record
+    matching HA's report template fails the test with the report text, so
+    deprecated-API usage is caught in CI the same way it is for core.
+    """
+
+    class _Handler(logging.Handler):
+        messages: list[str]
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.messages.append(record.getMessage())
+
+    handler = _Handler()
+    handler.messages = []
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        yield
+        hits = [
+            msg
+            for msg in handler.messages
+            if any(marker in msg for marker in _DEPRECATION_MARKERS)
+        ]
+        if hits:
+            pytest.fail(
+                "Home Assistant integration-report deprecation triggered:\n"
+                + "\n".join(sorted(set(hits)))
+            )
+    finally:
+        root.removeHandler(handler)
 
 
 MOCK_IRRIGATION_PROGRAMS = {
