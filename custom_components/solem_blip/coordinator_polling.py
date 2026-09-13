@@ -188,9 +188,10 @@ async def _fetch_device_metadata_locked(coordinator: SolemCoordinator) -> None:
             for station in coordinator.stations:
                 station.software_version = coordinator.firmware_version
             device_registry = dr.async_get(coordinator.hass)
-            device = device_registry.async_get_device(
-                identifiers={(DOMAIN, coordinator.controller_mac_address)}
-            )
+            device = device_registry.async_get_device_by_identifier(
+                (DOMAIN, coordinator.controller_mac_address),
+                config_entry_id=coordinator.config_entry.entry_id,
+            ) if coordinator.config_entry else None
             if device is not None:
                 device_registry.async_update_device(
                     device.id, sw_version=coordinator.firmware_version
