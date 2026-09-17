@@ -10,7 +10,6 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers import device_registry as dr
-from solem_blip_ble import IrrigationProgram
 
 from .config_entry import MyConfigEntry
 from .const import DOMAIN, PROGRAM_LABELS
@@ -63,31 +62,20 @@ _COMMON_SERVICE_SCHEMA = vol.Schema(
         vol.Required(ATTR_DEVICE_ID): cv.string,
     }
 )
-_SET_PROGRAM_SCHEMA = _COMMON_SERVICE_SCHEMA.extend(
-    {
-        vol.Required(ATTR_PROGRAM): vol.All(vol.Coerce(int), vol.Range(min=1, max=3)),
-        vol.Required(ATTR_NAME): cv.string,
-        vol.Required(ATTR_START_TIMES): vol.All(cv.ensure_list, [cv.string]),
-        vol.Required(ATTR_STATION_DURATIONS): dict,
-        vol.Optional(ATTR_CYCLE, default="custom"): vol.In(tuple(_CYCLES)),
-        vol.Optional(ATTR_WEEK_DAYS, default=list(_WEEKDAYS)): vol.All(
-            cv.ensure_list, list
-        ),
-        vol.Optional(ATTR_PERIOD_LENGTH, default=1): vol.All(
-            vol.Coerce(int), vol.Range(min=1, max=255)
-        ),
-        vol.Optional(ATTR_SYNCHRO_DAY, default=0): vol.All(
-            vol.Coerce(int), vol.Range(min=0, max=255)
-        ),
-        vol.Optional(ATTR_PERIOD_START_DATE): cv.date,
-        vol.Optional(ATTR_INTER_STATION_DELAY, default=0): vol.All(
-            vol.Coerce(int), vol.Range(min=0, max=65535)
-        ),
-        vol.Optional(ATTR_WATER_BUDGET, default=100): vol.All(
-            vol.Coerce(int), vol.Range(min=0, max=65535)
-        ),
-    }
-)
+_SET_PROGRAM_SCHEMA = _COMMON_SERVICE_SCHEMA.extend({
+    vol.Required(ATTR_PROGRAM): vol.All(vol.Coerce(int), vol.Range(min=1, max=3)),
+    vol.Required("revision"): cv.string,
+    vol.Optional(ATTR_NAME): cv.string,
+    vol.Optional(ATTR_START_TIMES): vol.All(cv.ensure_list, [cv.string]),
+    vol.Optional(ATTR_STATION_DURATIONS): dict,
+    vol.Optional(ATTR_CYCLE): vol.In(tuple(_CYCLES)),
+    vol.Optional(ATTR_WEEK_DAYS): vol.All(cv.ensure_list, list),
+    vol.Optional(ATTR_PERIOD_LENGTH): vol.All(vol.Coerce(int), vol.Range(min=1, max=255)),
+    vol.Optional(ATTR_SYNCHRO_DAY): vol.All(vol.Coerce(int), vol.Range(min=0, max=255)),
+    vol.Optional(ATTR_PERIOD_START_DATE): cv.date,
+    vol.Optional(ATTR_INTER_STATION_DELAY): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
+    vol.Optional(ATTR_WATER_BUDGET): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
+})
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:
@@ -109,7 +97,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             num_stations=coordinator.num_stations,
         )
         try:
-            await coordinator.set_irrigation_program(program_index, program)
+            await coordinator.set_irrigation_program(program_index, program, call.data["revision"])
         except Exception as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -121,8 +109,18 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     async def handle_refresh_programs(call: ServiceCall) -> None:
         coordinator = _coordinator_from_device(hass, call.data[ATTR_DEVICE_ID])
-        coordinator.request_schedule_refresh()
-        await coordinator.schedule_coordinator.async_request_refresh()
+        await coordinator.refresh_programs()
+
+    async def handle_accept_current(call: ServiceCall) -> None:
+        coordinator = _coordinator_from_device(hass, call.data[ATTR_DEVICE_ID])
+        await coordinator.refresh_programs(accept_current=True)
+
+    async def handle_rainfall(call: ServiceCall) -> None:
+        coordinator = _coordinator_from_device(hass, call.data[ATTR_DEVICE_ID])
+        await coordinator.rainfall.apply()
+
+    hass.services.async_register(DOMAIN, "apply_rainfall", handle_rainfall, schema=_COMMON_SERVICE_SCHEMA)
+    hass.services.async_register(DOMAIN, "accept_current_programs", handle_accept_current, schema=_COMMON_SERVICE_SCHEMA)
 
     hass.services.async_register(
         DOMAIN,
@@ -140,7 +138,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
 def async_unload_services(hass: HomeAssistant) -> None:
     """Remove Solem BL-IP services."""
-    for service in (SERVICE_SET_PROGRAM, SERVICE_REFRESH_PROGRAMS):
+    for service in (SERVICE_SET_PROGRAM, SERVICE_REFRESH_PROGRAMS, "accept_current_programs", "apply_rainfall"):
         if hass.services.has_service(DOMAIN, service):
             hass.services.async_remove(DOMAIN, service)
 
@@ -211,34 +209,22 @@ def _station_durations(value: dict[Any, Any], *, num_stations: int) -> list[int]
     return durations
 
 
-def _program_from_service_data(
-    data: dict[str, Any],
-    *,
-    num_stations: int,
-) -> IrrigationProgram:
-    start_times: list[int | None] = [
-        _parse_start_time(value) for value in data[ATTR_START_TIMES]
-    ]
-    if len(start_times) > 8:
-        raise vol.Invalid("start_times must contain at most 8 entries")
-    start_times.extend([None] * (8 - len(start_times)))
-
-    period_start_date = data.get(ATTR_PERIOD_START_DATE)
-    if isinstance(period_start_date, str):
-        period_start_date = date.fromisoformat(period_start_date)
-
-    return {
-        "name": str(data[ATTR_NAME]),
-        "inter_station_delay": int(data[ATTR_INTER_STATION_DELAY]),
-        "water_budget": int(data[ATTR_WATER_BUDGET]),
-        "cycle": _CYCLES[str(data[ATTR_CYCLE])],
-        "week_days": _week_days_mask(list(data[ATTR_WEEK_DAYS])),
-        "period_length": int(data[ATTR_PERIOD_LENGTH]),
-        "synchro_day": int(data[ATTR_SYNCHRO_DAY]),
-        "period_start_date": period_start_date,
-        "start_times": start_times,
-        "station_durations": _station_durations(
-            data[ATTR_STATION_DURATIONS],
-            num_stations=num_stations,
-        ),
-    }
+def _program_from_service_data(data: dict[str, Any], *, num_stations: int) -> dict[str, Any]:
+    """Translate only supplied fields; omitted stations/settings are preserved."""
+    result = {key: data[key] for key in (
+        ATTR_NAME, ATTR_INTER_STATION_DELAY, ATTR_WATER_BUDGET,
+        ATTR_PERIOD_LENGTH, ATTR_SYNCHRO_DAY, ATTR_PERIOD_START_DATE,
+    ) if key in data}
+    if ATTR_CYCLE in data:
+        result[ATTR_CYCLE] = _CYCLES[data[ATTR_CYCLE]]
+    if ATTR_WEEK_DAYS in data:
+        result[ATTR_WEEK_DAYS] = _week_days_mask(data[ATTR_WEEK_DAYS])
+    if ATTR_START_TIMES in data:
+        starts: list[int | None] = [_parse_start_time(value) for value in data[ATTR_START_TIMES]]
+        if len(starts) > 8:
+            raise vol.Invalid("start_times must contain at most 8 entries")
+        result[ATTR_START_TIMES] = starts + [None] * (8 - len(starts))
+    if ATTR_STATION_DURATIONS in data:
+        _station_durations(data[ATTR_STATION_DURATIONS], num_stations=num_stations)
+        result[ATTR_STATION_DURATIONS] = {int(key): int(value) for key, value in data[ATTR_STATION_DURATIONS].items()}
+    return result

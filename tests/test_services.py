@@ -59,23 +59,7 @@ async def test_set_program_service_writes_normalized_program(
         hass, mock_config_entry, mock_solem_client
     )
     coordinator.schedule_coordinator.async_set_updated_data = MagicMock()
-    mock_solem_client.set_irrigation_program = AsyncMock(
-        return_value={
-            **coordinator.irrigation_programs,
-            1: {
-                "name": "Evening",
-                "inter_station_delay": 5,
-                "water_budget": 80,
-                "cycle": 0,
-                "week_days": 0x05,
-                "period_length": 1,
-                "synchro_day": 0,
-                "period_start_date": date(2026, 6, 1),
-                "start_times": [360, 1110, None, None, None, None, None, None],
-                "station_durations": [60, 120],
-            },
-        }
-    )
+    coordinator.program_manager.update = AsyncMock()
 
     await hass.services.async_call(
         DOMAIN,
@@ -83,6 +67,7 @@ async def test_set_program_service_writes_normalized_program(
         {
             "device_id": device_id,
             "program": 2,
+            "revision": "draft-revision",
             "name": "Evening",
             "cycle": "custom",
             "week_days": ["monday", "wednesday"],
@@ -95,7 +80,7 @@ async def test_set_program_service_writes_normalized_program(
         blocking=True,
     )
 
-    mock_solem_client.set_irrigation_program.assert_awaited_once_with(
+    coordinator.program_manager.update.assert_awaited_once_with(
         1,
         {
             "name": "Evening",
@@ -103,12 +88,11 @@ async def test_set_program_service_writes_normalized_program(
             "water_budget": 80,
             "cycle": 0,
             "week_days": 0x05,
-            "period_length": 1,
-            "synchro_day": 0,
             "period_start_date": date(2026, 6, 1),
             "start_times": [360, 1110, None, None, None, None, None, None],
-            "station_durations": [60, 120],
+            "station_durations": {1: 60, 2: 120},
         },
+        "draft-revision", require_on=False,
     )
 
 
@@ -131,6 +115,7 @@ async def test_set_program_service_rejects_active_watering(
             {
                 "device_id": device_id,
                 "program": 1,
+                "revision": "draft-revision",
                 "name": "Blocked",
                 "start_times": ["06:00"],
                 "station_durations": {"1": 60},
@@ -151,7 +136,7 @@ async def test_refresh_programs_service_requests_schedule_refresh(
     coordinator, device_id = await _setup_service_target(
         hass, mock_config_entry, mock_solem_client
     )
-    coordinator.schedule_coordinator.async_request_refresh = AsyncMock()
+    coordinator.refresh_programs = AsyncMock()
 
     await hass.services.async_call(
         DOMAIN,
@@ -161,7 +146,7 @@ async def test_refresh_programs_service_requests_schedule_refresh(
     )
 
     assert coordinator._irrigation_config_refresh_after == 0.0
-    coordinator.schedule_coordinator.async_request_refresh.assert_awaited_once()
+    coordinator.refresh_programs.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -212,6 +197,7 @@ async def test_set_program_service_wraps_write_failure(
             {
                 "device_id": device_id,
                 "program": 1,
+                "revision": "draft-revision",
                 "name": "Failure",
                 "start_times": ["06:00"],
                 "station_durations": {"1": 60},
@@ -258,3 +244,27 @@ def test_program_service_data_validation_errors() -> None:
     ):
         with pytest.raises(vol.Invalid):
             _program_from_service_data(bad_data, num_stations=1)
+
+
+@pytest.mark.parametrize('service', ['accept_current_programs','apply_rainfall'])
+async def test_reconciliation_and_rainfall_actions(hass,mock_config_entry,mock_solem_client,service):
+    coordinator,device_id=await _setup_service_target(hass,mock_config_entry,mock_solem_client)
+    coordinator.refresh_programs=AsyncMock()
+    coordinator.rainfall.apply=AsyncMock()
+    await hass.services.async_call(DOMAIN,service,{'device_id':device_id},blocking=True)
+    if service=='accept_current_programs':
+        coordinator.refresh_programs.assert_awaited_once_with(accept_current=True)
+    else:
+        coordinator.rainfall.apply.assert_awaited_once()
+
+
+async def test_set_program_requires_revision(hass,mock_config_entry,mock_solem_client):
+    _,device_id=await _setup_service_target(hass,mock_config_entry,mock_solem_client)
+    with pytest.raises(vol.Invalid):
+        await hass.services.async_call(DOMAIN,SERVICE_SET_PROGRAM,{'device_id':device_id,'program':1,'water_budget':50},blocking=True)
+    mock_solem_client.write_program_frames.assert_not_awaited()
+
+
+def test_unspecified_program_fields_and_stations_are_not_defaulted():
+    assert _program_from_service_data({'water_budget':50},num_stations=6)=={'water_budget':50}
+    assert _program_from_service_data({'station_durations':{'6':123}},num_stations=6)=={'station_durations':{6:123}}

@@ -66,10 +66,10 @@ class StateSensor(SolemSensorEntity):
         )
 
     @property
-    def extra_state_attributes(self) -> dict[str, int | str | bool | None]:
+    def extra_state_attributes(self) -> dict[str, Any]:
         if "_irrigation_controller_" not in self.device_id:
             return {}
-        attributes: dict[str, int | str | bool | None] = {}
+        attributes: dict[str, Any] = {}
         if self.coordinator._is_watering:
             attributes["is_watering"] = True
         if self.coordinator.active_station_num is not None:
@@ -86,6 +86,17 @@ class StateSensor(SolemSensorEntity):
             attributes["controller_off_days_remaining"] = (
                 self.coordinator.controller_off_days_remaining
             )
+        manager = self.coordinator.program_manager
+        attributes.update({
+            "program_revision": manager.revision,
+            "programs_last_read": manager.last_read,
+            "programs_last_write": manager.last_write,
+            "program_write_uncertain": manager.pending is not None,
+            "program_error": manager.error,
+            "rainfall_status": self.coordinator.rainfall.reason,
+            "rainfall": self.coordinator.rainfall.dashboard_state,
+            "watering_activity": self.coordinator.activity.state,
+        })
         return attributes
 
 

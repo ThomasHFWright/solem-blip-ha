@@ -14,7 +14,7 @@
     "step": {
       "user": {
         "title": "Configuration du programmateur",
-        "description": "Sélectionnez votre programmateur Solem BL-IP et le nombre de stations. La programmation et la suspension en cas de pluie doivent être gérées dans les automatisations Home Assistant.",
+        "description": "Select the controller and physical station count. Watering programs run on the controller, including when Home Assistant is offline.",
         "data": {
           "controller_mac_address": "Adresse MAC du programmateur",
           "num_stations": "Nombre de stations"
@@ -39,22 +39,29 @@
       "invalid_program": "Vérifiez les valeurs de la programmation et réessayez.",
       "not_loaded": "L'intégration n'est pas encore chargée.",
       "set_program_failed": "Échec de la mise à jour du programme sélectionné.",
-      "set_program_while_watering": "Les programmations ne peuvent pas être modifiées lorsqu'un arrosage est en cours."
+      "set_program_while_watering": "Les programmations ne peuvent pas être modifiées lorsqu'un arrosage est en cours.",
+      "rainfall_baseline": "Refresh programs and confirm their current normal budgets before enabling rainfall adjustment. Resolve any uncertain write first.",
+      "stale_program": "The controller changed since this draft was opened. Cancel and reopen the editor before saving.",
+      "uncertain_write": "The write could not be confirmed. Refresh and review current device programs before making further edits.",
+      "station_name_uncertain": "Cette sauvegarde n’a pas pu être vérifiée. Fermez puis rouvrez l’éditeur pour relire le contrôleur. Si demandé, vérifiez et acceptez les noms actuels avant de sauvegarder à nouveau.",
+      "stale_station_name": "Les noms ont changé sur le contrôleur. Rouvrez cet éditeur.",
+      "invalid_station_name": "Saisissez un nom non vide de 32 octets UTF-8 maximum, sans caractère NUL.",
+      "station_name_failed": "Impossible de renommer la station. Le contrôleur BL-IP 5.x doit être au repos. Vérifiez le Bluetooth."
     },
     "step": {
       "init": {
         "menu_options": {
           "settings": "Options de l'intégration",
-          "program_select": "Modifier un programme sur l'appareil"
+          "program_select": "Modifier un programme sur l'appareil",
+          "rainfall": "Rainfall adjustment",
+          "station_select": "Renommer les stations du contrôleur"
         },
-        "description": "Réglez l'interrogation, les options Bluetooth et les programmes enregistrés sur l'appareil.",
+        "description": "Réglez la connexion, les programmes embarqués, les noms des stations et la réduction selon la pluie.",
         "title": "Options Solem BL-IP"
       },
       "settings": {
         "data": {
           "scan_interval": "Intervalle d'interrogation (secondes)",
-          "persistent_connection": "Conserver la connexion BLE entre les relevés (recommandé pour les contrôleurs instables)",
-          "persistent_hold_link": "Maintenir le lien BLE ouvert indéfiniment (pas de libération à l’inactivité). Stabilité maximale sur les contrôleurs sensibles au churn, mais l’application mobile ne peut pas se connecter tant que le lien est maintenu.",
           "bluetooth_timeout": "Délai d'expiration Bluetooth (secondes)",
           "solem_api_mock": "Simuler l'API Solem pour le débogage"
         },
@@ -97,7 +104,41 @@
         },
         "description": "Modifiez {program}. Les heures de démarrage laissées vides sont désactivées. Le programmateur n'est mis à jour qu'après la validation de ce formulaire.",
         "title": "Modifier une programmation sur l'appareil"
+      },
+      "rainfall": {
+        "title": "Rainfall adjustment",
+        "description": "Select only lawn programs. Baselines must match their normal device budgets. Rainfall is an accumulated rolling 24-hour total in mm. Saved reductions persist offline. A one-day delay pauses every program; its countdown follows the controller firmware. Validate device budget and delay behaviour before enabling automatic updates.",
+        "data": {
+          "sensor": "Rolling 24-hour rainfall sensor",
+          "target_mm": "Rainfall target (mm)",
+          "max_age_minutes": "Maximum report age (minutes)",
+          "programs": "Lawn programs",
+          "automatic": "Apply hourly while Home Assistant is running",
+          "whole_controller_delay": "Allow whole-controller one-day rain delay for complete skips",
+          "baseline_0": "Normal Program A budget (%)",
+          "baseline_1": "Normal Program B budget (%)",
+          "baseline_2": "Normal Program C budget (%)"
+        }
+      },
+      "station_select": {
+        "title": "Renommer les stations du contrôleur",
+        "description": "Choisissez une station à partir de son nom actuel enregistré sur le contrôleur.",
+        "data": {
+          "station": "Station",
+          "accept_current": "J’ai vérifié et accepté les noms actuels après la sauvegarde interrompue"
+        }
+      },
+      "station_name": {
+        "title": "Renommer la station {station}",
+        "description": "Enregistrez le nom sur le contrôleur pour MySOLEM. Maximum : 32 octets UTF-8. Les identifiants et noms personnalisés dans Home Assistant sont conservés.",
+        "data": {
+          "name": "Nom sur le contrôleur"
+        }
       }
+    },
+    "abort": {
+      "program_read_failed": "Could not read complete onboard programs. Check the controller connection and try again.",
+      "station_names_read_failed": "Impossible de lire tous les noms. Vérifiez la connexion Bluetooth."
     }
   },
   "entity": {
@@ -249,6 +290,26 @@
         "saturday": "Samedi",
         "sunday": "Dimanche"
       }
+    }
+  },
+  "services": {
+    "set_program": {
+      "name": "Edit onboard program",
+      "description": "Apply supplied fields to a freshly read program. Omitted settings are preserved.",
+      "fields": {
+        "revision": {
+          "name": "Revision",
+          "description": "Program revision from the controller status sensor when this draft was opened."
+        }
+      }
+    },
+    "accept_current_programs": {
+      "name": "Accept current programs",
+      "description": "Read and accept current device settings after reviewing an uncertain write. Does not write to the controller."
+    },
+    "apply_rainfall": {
+      "name": "Apply rainfall adjustment",
+      "description": "Apply the configured rainfall discount to selected onboard programs."
     }
   }
 }

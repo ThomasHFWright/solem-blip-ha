@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from copy import deepcopy
 from datetime import date
 from typing import Any
 
@@ -21,7 +23,9 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import selector
 
-from solem_blip_ble import IrrigationProgram, SolemConnectionError
+from .ble import IrrigationProgram, SolemConnectionError
+from .ble.snapshot import StaleProgram, UncertainWrite
+from .ble.station_names import StationNameSnapshot
 
 from .bluetooth import (
     async_get_connectable_device,
@@ -45,12 +49,11 @@ from .const import (
     MIN_NUM_STATIONS,
     MIN_SCAN_INTERVAL,
     NUM_STATIONS,
-    PERSISTENT_CONNECTION,
-    PERSISTENT_HOLD_LINK,
     PROGRAM_LABELS,
     SOLEM_API_MOCK,
 )
 from .config_entry import MyConfigEntry
+from .rainfall import RAIN_OPTIONS, program_fingerprint
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -175,6 +178,7 @@ class SolemConfigFlow(ConfigFlow, domain=DOMAIN):
                         "select": {
                             "options": bt_options,
                             "mode": "dropdown",
+                            "custom_value": True,
                         }
                     }
                 ),
@@ -248,6 +252,15 @@ class SolemConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             try:
+                selection = user_input[CONTROLLER_MAC_ADDRESS].strip()
+                address = selection.rsplit(" - ", 1)[-1].upper()
+                if not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", address):
+                    raise CannotConnect
+                label = selection.rsplit(" - ", 1)[0] if " - " in selection else "Solem BL-IP"
+                user_input = {
+                    **user_input,
+                    CONTROLLER_MAC_ADDRESS: f"{label} - {address}",
+                }
                 info = await validate_input(self.hass, user_input)
             except CannotConnectSlots:
                 errors["base"] = "cannot_connect_slots"
@@ -328,6 +341,10 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
     """Handle integration options."""
 
     _selected_program_index: int = 0
+    _draft: IrrigationProgram | None = None
+    _draft_revision: str | None = None
+    _station_draft: StationNameSnapshot | None = None
+    _selected_station: int = 1
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -343,7 +360,72 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
 
         return self.async_show_menu(
             step_id="init",
-            menu_options=[MENU_SETTINGS, MENU_EDIT_PROGRAM],
+            menu_options=[MENU_SETTINGS, MENU_EDIT_PROGRAM, "station_select", "rainfall"],
+        )
+
+    async def async_step_station_select(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Read current device names and choose the physical output to rename."""
+        coordinator = self._coordinator
+        if coordinator is None:
+            return self.async_abort(reason="station_names_read_failed")
+        errors: dict[str, str] = {}
+        if self._station_draft is None:
+            try:
+                await coordinator.refresh_station_names()
+                self._station_draft = coordinator.station_name_manager.snapshot
+            except Exception:
+                return self.async_abort(reason="station_names_read_failed")
+        assert self._station_draft is not None
+        if user_input is not None:
+            if coordinator.station_name_manager.pending and not user_input.get("accept_current"):
+                errors["base"] = "station_name_uncertain"
+            else:
+                if coordinator.station_name_manager.pending:
+                    try:
+                        await coordinator.refresh_station_names(accept_current=True)
+                        self._station_draft = coordinator.station_name_manager.snapshot
+                    except Exception:
+                        return self.async_abort(reason="station_names_read_failed")
+                self._selected_station = int(user_input["station"])
+                if not 1 <= self._selected_station <= coordinator.num_stations:
+                    return self.async_abort(reason="station_names_read_failed")
+                return await self.async_step_station_name()
+        fields: dict[Any, Any] = {
+            vol.Required("station", default="1"): selector({"select": {"mode": "dropdown", "options": [
+                {"value": str(i), "label": f"{i} — {self._station_draft.names[i]}"}
+                for i in range(1, coordinator.num_stations + 1)
+            ]}}),
+        }
+        if coordinator.station_name_manager.pending:
+            fields[vol.Required("accept_current", default=False)] = bool
+            errors["base"] = "station_name_uncertain"
+        return self.async_show_form(step_id="station_select", data_schema=vol.Schema(fields), errors=errors)
+
+    async def async_step_station_name(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Save a station name only after a fresh comparison with the draft."""
+        coordinator = self._coordinator
+        if coordinator is None or self._station_draft is None:
+            return self.async_abort(reason="station_names_read_failed")
+        errors: dict[str, str] = {}
+        name = self._station_draft.names[self._selected_station]
+        if user_input is not None:
+            name = user_input["name"]
+            try:
+                await coordinator.rename_station(self._selected_station, name, self._station_draft.revision)
+            except StaleProgram:
+                errors["base"] = "stale_station_name"
+            except (ValueError, vol.Invalid):
+                errors["name"] = "invalid_station_name"
+            except Exception as err:
+                _LOGGER.warning("Onboard station-name save could not be verified: %s", err)
+                errors["base"] = ("station_name_uncertain" if coordinator.station_name_manager.pending else "station_name_failed")
+            else:
+                return self.async_create_entry(title="", data=dict(self.config_entry.options))
+        return self.async_show_form(
+            step_id="station_name",
+            data_schema=vol.Schema({vol.Required("name", default=name): str}),
+            errors=errors,
+            description_placeholders={"station": str(self._selected_station)},
         )
 
     async def async_step_settings(
@@ -363,22 +445,6 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
                 ): vol.All(
                     vol.Coerce(int),
                     vol.Clamp(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL),
-                ),
-                vol.Required(
-                    PERSISTENT_CONNECTION,
-                    default=options.get(PERSISTENT_CONNECTION, False),
-                ): selector(
-                    {
-                        "boolean": {},
-                    }
-                ),
-                vol.Required(
-                    PERSISTENT_HOLD_LINK,
-                    default=options.get(PERSISTENT_HOLD_LINK, False),
-                ): selector(
-                    {
-                        "boolean": {},
-                    }
                 ),
                 vol.Required(
                     BLUETOOTH_TIMEOUT,
@@ -406,19 +472,64 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
 
         return self.async_show_form(step_id="settings", data_schema=data_schema)
 
+    async def async_step_rainfall(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Select lawn programs and explicitly confirm their normal budgets."""
+        current = self.config_entry.options.get(RAIN_OPTIONS, {})
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                coordinator = self._coordinator
+                if coordinator is None:
+                    raise ValueError("Integration is not loaded")
+                selected = user_input["programs"]
+                fingerprints = {}
+                baselines = {key: int(user_input[f"baseline_{key}"]) for key in selected}
+                if selected:
+                    await coordinator.refresh_programs()
+                    if coordinator.program_manager.pending:
+                        raise ValueError("Resolve the uncertain write first")
+                    for key in selected:
+                        program = coordinator.irrigation_programs[int(key)]
+                        # Re-enabling must explicitly acknowledge the current normal budget.
+                        confirmed = (
+                            baselines[key] == current.get("baselines", {}).get(key)
+                            and program_fingerprint(dict(program)) == current.get("fingerprints", {}).get(key)
+                            and program["water_budget"] == coordinator.rainfall.state.get("expected_budgets", {}).get(key)
+                        )
+                        if program["water_budget"] != baselines[key] and not confirmed:
+                            raise ValueError("Normal budget must match current device settings")
+                        fingerprints[key] = program_fingerprint(dict(program))
+                rainfall = {**user_input, "baselines": baselines, "fingerprints": fingerprints}
+                return self.async_create_entry(title="", data={**self.config_entry.options, RAIN_OPTIONS: rainfall})
+            except Exception:
+                errors["base"] = "rainfall_baseline"
+        fields: dict[Any, Any] = {
+            vol.Required("sensor", default=current.get("sensor", "")): selector({"entity": {"domain": "sensor"}}),
+            vol.Required("target_mm", default=current.get("target_mm", 4)): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000)),
+            vol.Required("max_age_minutes", default=current.get("max_age_minutes", 60)): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
+            vol.Required("programs", default=current.get("programs", [])): selector({"select": {"multiple": True, "options": [{"value": str(i), "label": f"Program {label}"} for i, label in enumerate(PROGRAM_LABELS)]}}),
+            vol.Required("automatic", default=current.get("automatic", False)): bool,
+            vol.Required("whole_controller_delay", default=current.get("whole_controller_delay", False)): bool,
+        }
+        for i in range(3):
+            fields[vol.Required(f"baseline_{i}", default=current.get("baselines", {}).get(str(i), 100))] = vol.All(vol.Coerce(int), vol.Range(min=1, max=65535))
+        return self.async_show_form(step_id="rainfall", data_schema=vol.Schema(fields), errors=errors)
+
     async def async_step_program_select(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Choose which on-device program to edit."""
         if user_input is not None:
             self._selected_program_index = int(user_input[ATTR_PROGRAM]) - 1
+            self._draft = None
+            self._draft_revision = None
             return await self.async_step_program_edit()
 
         return self.async_show_form(
             step_id="program_select",
             data_schema=vol.Schema(
                 {
-                    vol.Required(ATTR_PROGRAM, default=1): selector(
+                    vol.Required(ATTR_PROGRAM, default="1"): selector(
                         {
                             "select": {
                                 "options": self._program_select_options(
@@ -446,6 +557,13 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
             )
 
         program_index = self._selected_program_index
+        if self._draft is None:
+            try:
+                await coordinator.refresh_programs()
+                self._draft = deepcopy(coordinator.irrigation_programs[program_index])
+                self._draft_revision = coordinator.program_manager.revision
+            except Exception:
+                return self.async_abort(reason="program_read_failed")
         if user_input is not None:
             if coordinator._irrigation_active or coordinator._is_watering:
                 errors["base"] = "set_program_while_watering"
@@ -455,12 +573,22 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
                         user_input,
                         num_stations=coordinator.num_stations,
                         station_names=self._station_names(coordinator),
-                        current_program=coordinator.irrigation_programs.get(
-                            program_index
-                        ),
+                        current_program=self._draft,
                     )
-                    await coordinator.set_irrigation_program(program_index, program)
-                except vol.Invalid:
+                    changes: dict[str, Any] = {
+                        key: value for key, value in program.items()
+                        if key != "station_durations" and value != self._draft.get(key)
+                    }
+                    durations = {i + 1: value for i, value in enumerate(program["station_durations"])
+                                 if value != self._draft["station_durations"][i]}
+                    if durations:
+                        changes["station_durations"] = durations
+                    await coordinator.set_irrigation_program(program_index, changes, self._draft_revision)
+                except StaleProgram:
+                    errors["base"] = "stale_program"
+                except UncertainWrite:
+                    errors["base"] = "uncertain_write"
+                except (vol.Invalid, ValueError):
                     errors["base"] = "invalid_program"
                 except Exception:
                     _LOGGER.exception(
@@ -474,7 +602,7 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
                         data=dict(self.config_entry.options),
                     )
 
-        current_program = coordinator.irrigation_programs.get(program_index)
+        current_program = self._draft
         return self.async_show_form(
             step_id="program_edit",
             data_schema=self._program_schema(
@@ -527,10 +655,6 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
                 }
             ),
             vol.Required(
-                ATTR_PERIOD_START_DATE,
-                default=defaults[ATTR_PERIOD_START_DATE],
-            ): selector({"date": {}}),
-            vol.Required(
                 ATTR_PERIOD_LENGTH,
                 default=defaults[ATTR_PERIOD_LENGTH],
             ): vol.All(vol.Coerce(int), vol.Range(min=1, max=255)),
@@ -547,6 +671,9 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
                 default=defaults[ATTR_INTER_STATION_DELAY],
             ): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
         }
+        date_field = (vol.Optional(ATTR_PERIOD_START_DATE, default=defaults[ATTR_PERIOD_START_DATE])
+                      if defaults[ATTR_PERIOD_START_DATE] else vol.Optional(ATTR_PERIOD_START_DATE))
+        fields[date_field] = selector({"date": {}})
         for slot in range(8):
             key = self._start_key(slot)
             fields[vol.Optional(key, default=defaults[key])] = str
@@ -575,7 +702,7 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
             ATTR_WEEK_DAYS: self._weekdays_from_mask(
                 int(program_data.get("week_days", 0x7F))
             ),
-            ATTR_PERIOD_START_DATE: period_start_date or date.today(),
+            ATTR_PERIOD_START_DATE: period_start_date,
             ATTR_PERIOD_LENGTH: int(program_data.get("period_length", 1)),
             ATTR_SYNCHRO_DAY: int(program_data.get("synchro_day", 0)),
             ATTR_WATER_BUDGET: int(program_data.get("water_budget", 100)),
@@ -603,22 +730,11 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
             self._parse_optional_time(data.get(self._start_key(slot), ""))
             for slot in range(8)
         ]
-        period_start_date = data[ATTR_PERIOD_START_DATE]
+        period_start_date = data.get(ATTR_PERIOD_START_DATE, current_program.get("period_start_date") if current_program else None)
         if isinstance(period_start_date, str):
             period_start_date = date.fromisoformat(period_start_date)
-        previous_period_start_date = (
-            current_program.get("period_start_date")
-            if current_program is not None
-            else None
-        )
         period_length = int(data[ATTR_PERIOD_LENGTH])
         synchro_day = int(data[ATTR_SYNCHRO_DAY])
-        if period_start_date != previous_period_start_date:
-            synchro_day = (
-                (period_start_date - previous_period_start_date).days % period_length
-                if previous_period_start_date is not None
-                else 0
-            )
         return {
             "name": str(data[ATTR_NAME]),
             "inter_station_delay": int(data[ATTR_INTER_STATION_DELAY]),

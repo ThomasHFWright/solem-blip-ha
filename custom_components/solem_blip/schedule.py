@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from solem_blip_ble import IrrigationProgram
+    from .ble import IrrigationProgram
 
 _MAX_LOOKAHEAD_DAYS = 14
 

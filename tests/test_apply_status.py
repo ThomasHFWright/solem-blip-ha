@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from solem_blip_ble import parse_status_notification
+from custom_components.solem_blip.ble import parse_status_notification
 
 from custom_components.solem_blip.coordinator_polling import apply_status
 

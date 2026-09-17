@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 
 # Local artifacts
+DEVICE_PROGRAMS_PLAN.md
+.devtools/
 .DS_Store
 .coverage
 .mypy_cache/
