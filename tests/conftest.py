@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import logging
@@ -151,8 +152,25 @@ def create_mock_solem_client(station_num: int = 2) -> MagicMock:
     client.get_station_names = AsyncMock(return_value={
         station: f"Zone {station}" for station in range(1, station_num + 1)
     })
-    client.get_irrigation_config = AsyncMock(return_value=MOCK_IRRIGATION_PROGRAMS)
-    client.set_irrigation_program = AsyncMock(return_value=MOCK_IRRIGATION_PROGRAMS)
+    client.get_irrigation_config = AsyncMock(return_value=deepcopy(MOCK_IRRIGATION_PROGRAMS))
+    from contextlib import nullcontext
+    from dataclasses import replace
+    from custom_components.solem_blip.ble.snapshot import ProgramSnapshot
+    from custom_components.solem_blip.ble.protocol import pack_set_irrigation_program
+    async def read_snapshot():
+        programs = await client.get_irrigation_config()
+        frames = []
+        for index in range(3):
+            for chunk, frame in enumerate(pack_set_irrigation_program(index, programs[index], max_stations=12)):
+                frames.append(frame[:2] + bytes([6-chunk]) + frame[3:])
+        return replace(ProgramSnapshot.from_frames(tuple(frames)), programs=programs)
+    client.transaction.side_effect = nullcontext
+    client.get_program_snapshot = AsyncMock(side_effect=read_snapshot)
+    async def write_frames(frames, expected):
+        client.get_irrigation_config.return_value = expected.programs
+        return expected
+    client.write_program_frames = AsyncMock(side_effect=write_frames)
+    client.set_irrigation_program = AsyncMock(return_value=deepcopy(MOCK_IRRIGATION_PROGRAMS))
     client.set_time = AsyncMock()
     client.sprinkle_station_x_for_y_minutes = AsyncMock()
     client.run_program_x = AsyncMock()
@@ -195,3 +213,18 @@ async def coordinator(
         coordinator = SolemCoordinator(hass, mock_config_entry)
         await coordinator.async_init()
         return coordinator
+
+
+@pytest.fixture
+async def extended_program_snapshot():
+    """Synthetic twelve-slot response; no controller data or identifiers."""
+    from custom_components.solem_blip.ble.client_v2 import StatelessSolemClient
+    from custom_components.solem_blip.ble.snapshot import ProgramSnapshot
+    seed = StatelessSolemClient("AA:BB:CC:DD:EE:99", mock=True, max_station_num=6)
+    original = await seed.get_program_snapshot()
+    frames = tuple(
+        bytes([0x3A, frame[1], 83 - index * 7 - chunk, 0x10 + index]) + frame[4:]
+        for index in range(12)
+        for chunk, frame in enumerate(original.blocks[0])
+    )
+    return ProgramSnapshot.from_frames(frames)

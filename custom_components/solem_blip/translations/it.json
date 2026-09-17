@@ -14,7 +14,7 @@
     "step": {
       "user": {
         "title": "Configurazione controller",
-        "description": "Seleziona il controller Solem BL-IP e il numero di stazioni. La programmazione e l'esclusione in caso di pioggia vanno gestite con automazioni Home Assistant.",
+        "description": "Select the controller and physical station count. Watering programs run on the controller, including when Home Assistant is offline.",
         "data": {
           "controller_mac_address": "Indirizzo MAC del controller",
           "num_stations": "Numero di stazioni"
@@ -39,22 +39,29 @@
       "invalid_program": "Controlla i valori della programmazione e riprova.",
       "not_loaded": "L'integrazione non è ancora caricata.",
       "set_program_failed": "Aggiornamento del programma selezionato non riuscito.",
-      "set_program_while_watering": "Non è possibile modificare le programmazioni mentre l'irrigazione è attiva."
+      "set_program_while_watering": "Non è possibile modificare le programmazioni mentre l'irrigazione è attiva.",
+      "rainfall_baseline": "Refresh programs and confirm their current normal budgets before enabling rainfall adjustment. Resolve any uncertain write first.",
+      "stale_program": "The controller changed since this draft was opened. Cancel and reopen the editor before saving.",
+      "uncertain_write": "The write could not be confirmed. Refresh and review current device programs before making further edits.",
+      "station_name_uncertain": "Non è stato possibile verificare il salvataggio. Chiudi e riapri l’editor per rileggere il dispositivo. Se richiesto, controlla e accetta i nomi attuali prima di salvare nuovamente.",
+      "stale_station_name": "I nomi sono cambiati sul controller. Riapri questo editor.",
+      "invalid_station_name": "Inserisci un nome non vuoto di massimo 32 byte UTF-8, senza caratteri NUL.",
+      "station_name_failed": "Impossibile rinominare la stazione. Il controller BL-IP 5.x deve essere inattivo. Controlla il Bluetooth."
     },
     "step": {
       "init": {
         "menu_options": {
           "settings": "Opzioni integrazione",
-          "program_select": "Modifica programma sul dispositivo"
+          "program_select": "Modifica programma sul dispositivo",
+          "rainfall": "Rainfall adjustment",
+          "station_select": "Rinomina le stazioni sul controller"
         },
-        "description": "Modifica polling, opzioni BLE e programmi sul dispositivo.",
+        "description": "Configura connessione, programmi sul dispositivo, nomi delle stazioni e regolazione in base alla pioggia.",
         "title": "Opzioni Solem BL-IP"
       },
       "settings": {
         "data": {
           "scan_interval": "Intervallo di scansione (secondi)",
-          "persistent_connection": "Mantieni la connessione BLE tra i rilevamenti (consigliato per controller instabili)",
-          "persistent_hold_link": "Mantieni il collegamento BLE aperto indefinitamente (nessun rilascio a riposo). Massima stabilità sui controller sensibili al churn, ma l’app per telefono non può connettersi mentre il collegamento è attivo.",
           "bluetooth_timeout": "Timeout Bluetooth (secondi)",
           "solem_api_mock": "Simula API Solem (debug)"
         },
@@ -97,31 +104,94 @@
         },
         "description": "Aggiorna {program}. Le ore di avvio vuote sono disabilitate. Il controller viene scritto solo dopo l'invio di questo modulo.",
         "title": "Modifica programmazione sul dispositivo"
+      },
+      "rainfall": {
+        "title": "Rainfall adjustment",
+        "description": "Select only lawn programs. Baselines must match their normal device budgets. Rainfall is an accumulated rolling 24-hour total in mm. Saved reductions persist offline. A one-day delay pauses every program; its countdown follows the controller firmware. Validate device budget and delay behaviour before enabling automatic updates.",
+        "data": {
+          "sensor": "Rolling 24-hour rainfall sensor",
+          "target_mm": "Rainfall target (mm)",
+          "max_age_minutes": "Maximum report age (minutes)",
+          "programs": "Lawn programs",
+          "automatic": "Apply automatically while Home Assistant is running",
+          "whole_controller_delay": "Allow whole-controller one-day rain delay for complete skips",
+          "baseline_0": "Normal Program A budget (%)",
+          "baseline_1": "Normal Program B budget (%)",
+          "baseline_2": "Normal Program C budget (%)",
+          "timing": "Adjustment timing"
+        }
+      },
+      "station_select": {
+        "title": "Rinomina le stazioni sul controller",
+        "description": "Seleziona una stazione usando il nome attualmente salvato sul controller.",
+        "data": {
+          "station": "Stazione",
+          "accept_current": "Ho controllato e accetto i nomi attuali dopo il salvataggio interrotto"
+        }
+      },
+      "station_name": {
+        "title": "Rinomina stazione {station}",
+        "description": "Salva il nome sul controller per MySOLEM. Massimo 32 byte UTF-8. Gli ID e i nomi personalizzati di Home Assistant restano invariati.",
+        "data": {
+          "name": "Nome sul controller"
+        }
       }
+    },
+    "abort": {
+      "program_read_failed": "Could not read complete onboard programs. Check the controller connection and try again.",
+      "station_names_read_failed": "Impossibile leggere tutti i nomi. Controlla il collegamento Bluetooth."
     }
   },
   "entity": {
     "binary_sensor": {
-      "battery_low": { "name": "Batteria scarica" },
-      "time_alarm": { "name": "Orologio non sincronizzato" },
-      "program_running": { "name": "{program_name} in esecuzione" }
+      "battery_low": {
+        "name": "Batteria scarica"
+      },
+      "time_alarm": {
+        "name": "Orologio non sincronizzato"
+      },
+      "program_running": {
+        "name": "{program_name} in esecuzione"
+      }
     },
     "button": {
-      "controller_off": { "name": "Spegni controller" },
-      "controller_off_days": { "name": "Spegni controller per i giorni selezionati" },
-      "controller_on": { "name": "Accendi controller" },
-      "start_program": { "name": "Avvia {program_name}" },
-      "sprinkle_station": { "name": "Irriga {station_name}" },
-      "stop_sprinkle": { "name": "Interrompi irrigazione" }
+      "controller_off": {
+        "name": "Spegni controller"
+      },
+      "controller_off_days": {
+        "name": "Spegni controller per i giorni selezionati"
+      },
+      "controller_on": {
+        "name": "Accendi controller"
+      },
+      "start_program": {
+        "name": "Avvia {program_name}"
+      },
+      "sprinkle_station": {
+        "name": "Irriga {station_name}"
+      },
+      "stop_sprinkle": {
+        "name": "Interrompi irrigazione"
+      }
     },
     "number": {
-      "controller_off_days": { "name": "Giorni di spegnimento controller" },
-      "irrigation_manual_duration": { "name": "Durata irrigazione manuale" }
+      "controller_off_days": {
+        "name": "Giorni di spegnimento controller"
+      },
+      "irrigation_manual_duration": {
+        "name": "Durata irrigazione manuale"
+      }
     },
     "sensor": {
-      "battery": { "name": "Batteria" },
-      "battery_voltage": { "name": "Tensione batteria" },
-      "controller_off_days_remaining": { "name": "Giorni di spegnimento rimanenti" },
+      "battery": {
+        "name": "Batteria"
+      },
+      "battery_voltage": {
+        "name": "Tensione batteria"
+      },
+      "controller_off_days_remaining": {
+        "name": "Giorni di spegnimento rimanenti"
+      },
       "controller_status": {
         "name": "Stato controller",
         "state": {
@@ -130,10 +200,18 @@
           "unknown": "Sconosciuto"
         }
       },
-      "last_time_sync": { "name": "Ultima sincronizzazione dell'ora" },
-      "program_next_start": { "name": "Prossimo avvio di {program_name}" },
-      "program_schedule": { "name": "Programmazione di {program_name}" },
-      "station_remaining_time": { "name": "Tempo residuo di {station_name}" },
+      "last_time_sync": {
+        "name": "Ultima sincronizzazione dell'ora"
+      },
+      "program_next_start": {
+        "name": "Prossimo avvio di {program_name}"
+      },
+      "program_schedule": {
+        "name": "Programmazione di {program_name}"
+      },
+      "station_remaining_time": {
+        "name": "Tempo residuo di {station_name}"
+      },
       "station_status": {
         "name": "Stato {station_name}",
         "state": {
@@ -144,7 +222,9 @@
       }
     },
     "valve": {
-      "station_valve": { "name": "{station_name}" }
+      "station_valve": {
+        "name": "{station_name}"
+      }
     }
   },
   "exceptions": {
@@ -211,6 +291,26 @@
         "saturday": "Sabato",
         "sunday": "Domenica"
       }
+    }
+  },
+  "services": {
+    "set_program": {
+      "name": "Edit onboard program",
+      "description": "Apply supplied fields to a freshly read program. Omitted settings are preserved.",
+      "fields": {
+        "revision": {
+          "name": "Revision",
+          "description": "Program revision from the controller status sensor when this draft was opened."
+        }
+      }
+    },
+    "accept_current_programs": {
+      "name": "Accept current programs",
+      "description": "Read and accept current device settings after reviewing an uncertain write. Does not write to the controller."
+    },
+    "apply_rainfall": {
+      "name": "Apply rainfall adjustment",
+      "description": "Apply the configured rainfall discount to selected onboard programs."
     }
   }
 }

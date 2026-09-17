@@ -3,7 +3,7 @@
 ## Project overview
 
 Home Assistant custom integration for Solem BL-IP Bluetooth irrigation controllers.
-Uses `solem-blip-ble` library for BLE communication.
+BLE communication is bundled in `custom_components/solem_blip/ble/` with upstream MIT attribution; do not add a separate Solem Toolkit or BLE package.
 Single package: `custom_components/solem_blip/`.
 
 ## Minimum requirements
@@ -42,8 +42,7 @@ python -m json.tool custom_components/solem_blip/manifest.json
 - Dependabot (`.github/dependabot.yml`) opens weekly PRs for pinned GitHub Actions
   and for uv dependency updates (pyproject + uv.lock together).
 - CI runs `pip-audit` against the locked dependency set on every push/PR.
-- Keep the `solem-blip-ble` requirement exact (`==`) and bump it deliberately,
-  coordinated with a `solem-blip-ble` release.
+- Use Home Assistant's `bluetooth` dependency for runtime Bleak packages; do not pin conflicting copies in the manifest. Keep local development dependencies exact (`==`) and aligned with HA constraints. Ship Solem protocol/client changes in this integration.
 
 ## CI workflow
 
@@ -64,7 +63,7 @@ Use the lightweight Git Flow policy in `docs/branching_and_release.md`.
 - Use immutable `-beta.N` or `-rc.N` pre-releases for changes that need live HA validation before stable release.
 - Commit version-only release bumps directly to `main` after candidate PR CI is green; do not open release-bump PRs.
 - HA CI skips full validation for version-only release-bump pushes and runs only lightweight sanity checks.
-- Keep release commits scoped to the HA integration; do not combine BLE library changes.
+- Release the HA integration and its bundled BLE changes together.
 
 ## Key directories
 

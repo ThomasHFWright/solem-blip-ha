@@ -1,233 +1,75 @@
 # Solem BL-IP for Home Assistant
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![CI](https://github.com/beelzetron/solem-blip-ha/actions/workflows/ci.yml/badge.svg)](https://github.com/beelzetron/solem-blip-ha/actions/workflows/ci.yml)
-[![coverage](./badges/coverage.svg)](https://github.com/beelzetron/solem-blip-ha/actions/workflows/ci.yml)
-[![GitHub release](https://img.shields.io/github/release/beelzetron/solem-blip-ha.svg)](https://github.com/beelzetron/solem-blip-ha/releases/)
+Manage the original Solem BL-IP controller's onboard A/B/C watering programs from Home Assistant. The controller owns scheduled starts and stops. Home Assistant does not run a parallel watering schedule or issue catch-up starts after reconnecting.
 
-Minimal Home Assistant integration for the Solem **BL-IP** Bluetooth irrigation controller.
+Based on [beelzetron/solem-blip-ha](https://github.com/beelzetron/solem-blip-ha). The MIT-licensed BLE implementation is bundled inside this integration with its [attribution](custom_components/solem_blip/ble/NOTICE.md). No separate Solem Toolkit, Solem BLE package or custom dashboard card is needed. Generic Bluetooth packages are supplied by Home Assistant's Bluetooth integration.
 
-This is a **separate project** focused on BLE status, battery monitoring, manual control, and editing the controller's on-device programs. Home Assistant scheduling helpers, rain math, and the Solem Schedule Card are **not** included. If you want the full scheduler integration, use [Henrique Craveiro's original project](https://github.com/hcraveiro/Home-Assistant-Solem-Bluetooth-Watering-Controller).
-
-Requires Home Assistant **2026.3.0** or newer, the first Home Assistant release running on Python 3.14.
-
-## Features
-
-- Controller status (`on` / `off` / `unknown`) and per-station status (`active` / `inactive`; translated in the UI)
-- Per-station remaining sprinkle time (seconds from BLE while watering)
-- Battery percentage, voltage (diagnostic), and low-battery alert
-- Manual sprinkle per station, station water valves, stop, controller on/off
-- Temporary controller off for a selected number of days
-- Configurable manual duration (minutes)
-- On-device program schedule sensors (next start, schedule summary, names)
-- Configure-menu editor for on-device program start times and station durations,
-  using loaded program and station names when available
-- Manual start buttons for on-device programs
-- Program run detection (`0x44` status) with per-program running binary sensors
-- Controller status attributes: active program, program name, watering origin
-- Daily controller RTC synchronization after a successful BLE poll
-- Repair issue when Bluetooth polling fails repeatedly
-- Uses the [`solem-blip-ble`](https://pypi.org/project/solem-blip-ble/) library via Home Assistant Bluetooth
-
-This integration supports the original Solem BL-IP controller running firmware 5.x.
-BL-IP V2 controllers running firmware 6.x are not supported.
-
-Firmware 5.x behavior is validated against physical BL-IP hardware and
-capture-backed protocol fixtures in the BLE library.
+Requires Home Assistant 2026.3 or newer. Program editing supports original BL-IP firmware 5.x; firmware 6.x is not supported.
 
 ## Installation
 
-### HACS
+Copy `custom_components/solem_blip` into Home Assistant's `custom_components` directory and restart HA. Add **Solem BL-IP** through Settings → Devices & services, select the discovered controller, and specify the physical station count. Use only one integration for the controller's Bluetooth connection.
 
-Use this link to open this repository in HACS on your Home Assistant instance:
+Setup reads existing settings. It never uploads default or cached programs. Automatic clock synchronization remains enabled, using HA's configured local timezone after a successful idle status read. BLE connections are short, serialized per controller, and disconnected after each operation.
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=beelzetron&repository=solem-blip-ha&category=integration)
+HA reads the controller display name from the optional identification response during its firmware read. A confirmed name is cached for offline starts and used for the default device label; custom HA names and entity IDs are preserved. Missing or malformed name responses leave the existing name intact. It does not use or correct Bluetooth advertisement names. The read keeps the same short connection open for at most two additional seconds if the optional name is absent; no rename command is sent. Reload the integration to read a changed onboard controller name.
 
-_or_
+## Programs and controls
 
-1. Install [HACS](https://hacs.xyz/) if needed
-2. HACS → **Integrations** → menu (⋮) → **Custom repositories**
-3. Add `https://github.com/beelzetron/solem-blip-ha` as category **Integration**
-4. Search for **Solem BL-IP** and install
-5. Restart Home Assistant
-6. Settings → Devices & Services → Add Integration → **Solem BL-IP**
+Use **Configure → Edit program** for the onboard program editor. It supports three programs, eight start slots per program, calendar modes, station durations, inter-station delay and water budget. Station labels come from the controller. Editing does not turn the controller ON or start watering.
 
-Setup asks only for the **Bluetooth controller** and **number of stations**.
+Opening the editor reads all programs. Saving reads them again and refuses a stale draft if any settings have changed. Only edited fields are patched; other programs, unused station slots and uninterpreted bytes are preserved. Unsupported block layouts and interval programs with unknown date/phase are rejected instead of filled with guessed values.
 
-### BLE dependency
+Writes use the inferred upstream seven-frame `2f`/`37` sequence, without the manual-command `3b00` commit. Every write is followed by a complete readback, including the interval date. The protocol does not establish atomic interrupted-write behaviour. A private HA storage journal records the before/expected configurations before transmitting. A failed or cancelled write is not replayed automatically; further edits are blocked until a fresh read reconciles it.
 
-Home Assistant installs `solem-blip-ble==0.1.36` from PyPI automatically. Protocol notes: [solem-blip-ble docs](https://github.com/beelzetron/solem-blip-ble/blob/main/docs/ble_protocol.md).
+The controller status sensor exposes `program_revision`, `programs_last_read`, `programs_last_write`, `program_write_uncertain`, `program_error` and `rainfall_status`. A failed read leaves the last complete snapshot visible with its timestamp/error. If a fresh read differs from both the before and expected snapshots, inspect the current programs and use **Accept current programs** before making another edit.
 
-## Entities (example: 6 stations)
+Available actions:
 
-| Entity | Purpose |
-|--------|---------|
-| Controller status | `on` / `off` / `unknown`; attributes `active_program`, `active_program_name`, `watering_origin` while watering |
-| Device firmware | Shown in the Home Assistant device information |
-| Battery | 0–100% (from 9V battery level 0–5) |
-| Battery voltage | Diagnostic (disabled by default) |
-| Battery low | Binary alert |
-| Station status | `active` / `inactive`, using the controller-provided station name |
-| Station remaining time | Minutes left while active (`0` when idle) |
-| Station valve | Open starts manual watering; close/stop sends the controller-wide stop command |
-| Irrigation manual duration | Minutes for station valves and sprinkle buttons |
-| Controller off days | Number of days for temporary controller off |
-| Sprinkle station N | Start manual watering |
-| Stop sprinkle | Stop active watering |
-| Turn on / off controller | Enable or disable controller permanently |
-| Turn off controller for selected days | Disable controller temporarily using the selected off-days value |
-| Start program | Manually start one on-device program (A/B/C) |
-| Program next start | Per on-device program (e.g. `Siepe next start`); timestamp + schedule context attributes |
-| Program schedule | Enabled start slots, cycle, period length, synchro day, station durations |
-| Program running | `on` while that program is executing on the controller |
+- `solem_blip.refresh_programs`: await a complete fresh read.
+- `solem_blip.set_program`: select a device and program (1–3), provide the revision from when the draft was opened, and supply only fields to change. `station_durations` maps physical station numbers to seconds; omitted stations are preserved. `start_times`, when supplied, replaces all eight slots; omitted trailing slots are disabled.
+- `solem_blip.accept_current_programs`: explicitly accept fresh settings after an uncertain write; this action itself does not write to the device.
+- `solem_blip.apply_rainfall`: apply the configured rainfall discount once.
 
-Roughly **47 entities** for a 6-station controller (12 program-related entities: start, next start, schedule, and running per program).
+Manual station/program start, stop, permanent ON/OFF and temporary rain-delay controls remain available. They act immediately when deliberately invoked. Program schedule sensors are estimates for display, particularly interval schedules; they do not trigger irrigation. Native HA tiles can show these sensors, with a navigation button to the integration's Configure menu for editing.
 
-### Monitor a scheduled program run
+## Onboard station names
 
-Compare the **next start** sensor to the **running** binary when verifying on-device schedules:
+Use **Configure → Rename onboard stations**, select a physical station, and save its new name. This changes the name stored on the controller and displayed in MySOLEM. Home Assistant entity IDs and custom display-name overrides are preserved; entities without an override follow the onboard name.
 
-```yaml
-alias: Alert when Program C runs off-schedule
-trigger:
-  - platform: state
-    entity_id: binary_sensor.solem_blip_aabbccddeeff_program_c_running
-    to: "on"
-condition:
-  - condition: template
-    value_template: >
-      {{ (now() - states.sensor.solem_blip_aabbccddeeff_program_c_next_start.last_changed).total_seconds() > 900 }}
-action:
-  - action: notify.persistent_notification
-    data:
-      message: "Program C started more than 15 minutes from its next-start sensor"
+Names must be non-empty and fit 32 UTF-8 bytes. Accents and emoji can occupy multiple bytes; long names are rejected rather than truncated. The editor requires a complete fresh read and an idle V5 controller. Saving the unchanged name sends no name-write frames.
+
+Saving compares every output name with the opened draft. The write session first reads and checks the complete names again, then writes only the selected station and verifies all output names on that same subscribed connection. This checks notification delivery before mutation and avoids reconnecting between the write and its verification. The connection is released after the transaction, including on cancellation. The V5 name command is two `33 12` frames with part indices 0 and 1, a zero-based output index, and 16 bytes of zero-padded name data each. Each name frame waits for its `34` acknowledgement before the next frame or disconnect. Full name-write acknowledgements echo the part index (0 or 1) and zero-based output index; this is distinct from the countdown used in name-read responses. Only the matching part/output acknowledgement advances the write; unrelated notifications do not count as acknowledgement. It does not use the manual-command `3b00` commit or program writes. Permanent OFF and watering programs are preserved.
+
+A private journal records an in-progress save before transmission. Interrupted writes are never replayed automatically. Reopen the editor to read the controller again; if the result matches neither the old nor intended names, review and explicitly accept the current names before another edit.
+
+## Rainfall adjustment
+
+Configure **Rainfall adjustment** with an existing rolling 24-hour rainfall total in millimetres. Do not integrate an already accumulated total again. Explicitly select the lawn programs and confirm their normal water-budget baselines. Leave other programs unselected.
+
+`fraction = clamp(1 - rainfall_24h / target_mm, 0, 1)`
+
+For an illustrative 4 mm target, totals of 0, 1, 2, 3 and 4+ mm give 100%, 75%, 50%, 25% and a complete skip. The target is configurable; it is not a daily watering recommendation or a soil-moisture model. The existing onboard watering cadence stays unchanged.
+
+Partial discounts always use the confirmed baseline, not the previous reduced budget. Automatic application is opt-in and checks hourly while HA is running. Otherwise use the action manually. Missing, unavailable, negative, non-finite, restored or stale rainfall is rejected. After integration startup, a new report is required before using the sensor. External program or budget changes pause adjustment until the normal baseline is reviewed.
+
+Automatic adjustment never writes a persistent 0% budget. A complete skip requires separate permission for a whole-controller, one-day rain delay, and is refused if an unselected active program would also be paused. Permanent OFF and existing delays are preserved. The delay is requested at most once per observed wet episode; an uncertain request is not replayed. A one-day setting follows the controller's countdown rules and is not claimed to mean exactly 24 hours.
+
+The last saved settings persist when HA, Bluetooth or the network is unavailable. A reduced budget can therefore persist indefinitely offline; automatic offline restoration to 100% is not provided. Disable automatic adjustment before manually restoring/reconfiguring a baseline. Disabling the feature itself sends no device commands.
+
+Validate budget scaling, delay countdown and interval behaviour on the target firmware before enabling automatic rainfall adjustment. Follow the [hardware validation procedure](docs/hardware-validation.md) for a deliberate watering test.
+
+## Development
+
+```sh
+uv sync --frozen --extra dev
+uv run pytest
+uv run mypy custom_components/solem_blip
+python -m compileall -q custom_components
 ```
 
-While watering, check **Controller status** attributes: `watering_origin: program` and `active_program_name` match the running binary.
+Tests use synthetic BLE responses and software fixtures. Hardware acceptance and release procedures are separate. See [AGENTS.md](AGENTS.md) and [branching and release](docs/branching_and_release.md).
 
-## Scheduling with Home Assistant
+Controllers that omit service identifiers from their advertisements can be added by entering their Bluetooth MAC address in setup. The controller must still be visible to a connectable Home Assistant Bluetooth adapter or proxy.
 
-Use native automations (or the HA Scheduler integration) instead of built-in irrigation logic.
-
-### Daily watering at a fixed time
-
-```yaml
-alias: Water lawn station 1
-trigger:
-  - platform: time
-    at: "06:00:00"
-condition:
-  - condition: state
-    entity_id: sensor.solem_blip_aabbccddeeff_station_1_status
-    state: "inactive"
-action:
-  - action: button.press
-    target:
-      entity_id: button.solem_blip_aabbccddeeff_sprinkle_station_1
-```
-
-Set **Irrigation manual duration** (`number.*_irrigation_manual_duration`) to control how long each station valve or sprinkle button runs.
-
-### Skip when rain is forecast
-
-```yaml
-alias: Water station 1 unless rain forecast
-trigger:
-  - platform: time
-    at: "06:00:00"
-action:
-  - action: weather.get_forecasts
-    target:
-      entity_id: weather.home
-    data:
-      type: daily
-    response_variable: daily
-  - condition: template
-    value_template: "{{ daily['weather.home'].forecast[0].precipitation | float(0) < 1 }}"
-  - action: button.press
-    target:
-      entity_id: button.solem_blip_aabbccddeeff_sprinkle_station_1
-```
-
-Adjust entity IDs and thresholds for your weather integration and layout.
-
-### Skip while raining
-
-```yaml
-condition:
-  - condition: state
-    entity_id: weather.home
-    state: "rainy"
-    attribute: condition
-```
-
-Or use a rain-rate sensor / binary rain sensor from your weather stack.
-
-## Brand icon
-
-Home Assistant **2026.3+** loads the integration icon from `custom_components/solem_blip/brand/icon.png` on your instance. It appears on the **Settings → Devices & Services** integration tile, the device page, and the config flow.
-
-After installing or updating via HACS:
-
-1. Confirm the file exists on your Home Assistant host:
-   ```bash
-   ls -la /config/custom_components/solem_blip/brand/icon.png
-   ```
-2. If missing, use HACS → **Solem BL-IP** → **Redownload**.
-3. **Restart Home Assistant** (not just reload the integration). HA scans the `brand/` folder only at startup.
-
-**HACS store listing:** The HACS dashboard may still show a blank icon for this integration. That is a [known HACS limitation](https://github.com/hacs/integration/issues/5171) with local-only brand assets; the icon should still work inside Home Assistant itself after restart.
-
-## Options
-
-From the integration **Configure** menu:
-
-- **Scan interval** — BLE poll interval (seconds)
-- **Bluetooth timeout** — connection timeout (seconds)
-- **Mock Solem API** — debug without hardware
-- **Edit on-device program** — update one controller program (A/B/C), including
-  start times and station durations in minutes. Loaded program names appear in
-  the selector, and loaded station names appear in duration field labels.
-
-The integration polls BLE status every 60 seconds by default and refreshes the
-schedule stored on the controller separately every hour. Failed schedule reads
-retry every 15 minutes without delaying status updates. The Configure menu can
-write the controller's on-device programs. Home Assistant automations or another
-scheduler are still recommended for weather-aware schedules and other logic that
-does not live on the controller.
-
-## Upgrading to 1.2.3+
-
-Version **1.2.3** migrates entity `unique_id` values to a stable MAC + role format
-(counter-based IDs are retired). Version **1.2.4** removes redundant per-program
-name sensors and uses on-device program names in entity titles. After updating:
-
-1. Restart Home Assistant or reload the **Solem BL-IP** integration once.
-2. Orphaned, restored, or retired program name entities are removed automatically.
-3. Program entities are recreated with device-based titles on the next schedule read.
-4. Existing `entity_id` values are preserved when possible for remaining entities.
-
-## Removal
-
-Remove the integration from Settings → Devices & Services → Solem BL-IP. The
-controller device is tied to its config entry. Home Assistant only enables independent
-device removal after repeated polling failures indicate that the controller is stale.
-
-## Troubleshooting
-
-- Avoid using mobile apps while Home Assistant is actively connected to the controller.
-  When **Release BLE connection after each status poll** is enabled, other BLE
-  clients can use the controller between Home Assistant polling connections.
-- Add a Bluetooth proxy closer to the controller if discovery is intermittent.
-- If polling fails repeatedly, open **Settings → System → Repairs** and follow the Bluetooth unavailable issue for the controller.
-- Use the integration diagnostics download to inspect availability, battery state,
-  metadata retry timing, and schedule-read state. The controller MAC address is redacted.
-- BL-IP V2 firmware 6.x is intentionally unsupported.
-
-## Credits
-
-See [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
-
-## License
-
-MIT — see [LICENSE](LICENSE). Original work Copyright (c) 2025 Henrique Craveiro.
+The V5 twelve-slot response is preserved in full, including the nine additional storage slots. Only A/B/C are exposed for editing; whole-controller rainfall delays also check the additional slots for active schedules.

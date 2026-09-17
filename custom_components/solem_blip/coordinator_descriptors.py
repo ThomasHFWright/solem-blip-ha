@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from homeassistant.util import dt as dt_util
 from typing import TYPE_CHECKING, Any
 
 from .const import PROGRAM_LABELS
@@ -305,10 +305,12 @@ def build_program_descriptors(
 ) -> list[dict[str, Any]]:
     """Build read-only program schedule entity descriptors."""
     data: list[dict[str, Any]] = []
-    now = datetime.now().astimezone()
+    now = dt_util.now()
 
     for program_index, label in enumerate(PROGRAM_LABELS):
         program = coordinator.irrigation_programs.get(program_index)
+        if program:
+            program = {**program, "station_durations": program["station_durations"][:coordinator.num_stations]}
         label_lower = label.lower()
         mac = coordinator.controller_mac_address
         display_name = coordinator._program_display_name(program_index)
