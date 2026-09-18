@@ -6,21 +6,21 @@ import asyncio
 import logging
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import Any
 
 from homeassistant.const import CONF_SCAN_INTERVAL
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Context, HomeAssistant
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from solem_blip_ble import IrrigationProgram
+from .ble import IrrigationProgram
 
 from .client_factory import (
-    PersistentSolemClient,
     build_solem_client,
 )
 
 from .config_entry import MyConfigEntry
+from .controller_name import CONTROLLER_NAME
 from .const import (
     BLUETOOTH_DEFAULT_TIMEOUT,
     BLUETOOTH_TIMEOUT,
@@ -31,8 +31,6 @@ from .const import (
     DOMAIN,
     IRRIGATION_CONFIG_UPDATE_INTERVAL,
     NUM_STATIONS,
-    PERSISTENT_CONNECTION,
-    PERSISTENT_DISCONNECT_TIMEOUT,
     PROGRAM_LABELS,
     SOLEM_API_MOCK,
 )
@@ -59,6 +57,10 @@ from .coordinator_polling import (
 from .coordinator_publish import publish_descriptor_update
 from .bluetooth import async_get_connectable_device
 
+from .activity import WateringActivity
+from .programs import ProgramManager
+from .station_names import StationNameManager
+from .rainfall import RainfallManager
 from .models import IrrigationController, IrrigationStation
 from .ble_health import note_cycle_outcome
 from .bluetooth_issue import note_ble_recovery
@@ -73,6 +75,9 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self.controller_mac_address = config_entry.data[CONTROLLER_MAC_ADDRESS].rsplit(
             " - ", 1
         )[1]
+        self.controller_name: str = config_entry.data.get(
+            CONTROLLER_NAME, self.controller_mac_address
+        )
         _LOGGER.info(
             "%s - Starting coordinator initialization...",
             self.controller_mac_address,
@@ -124,8 +129,10 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 hass, self.controller_mac_address
             ),
         )
-        self.persistent_connection = isinstance(self.api, PersistentSolemClient)
 
+        self.program_manager = ProgramManager(hass, config_entry.entry_id, self.api)
+        self.station_name_manager = StationNameManager(hass, config_entry.entry_id, self.api)
+        self.rainfall = RainfallManager(self)
         self.irrigation_stop_event = asyncio.Event()
         self._irrigation_active = False
         self._irrigation_monitor_task: asyncio.Task[None] | None = None
@@ -162,6 +169,7 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._metadata_ready_after = float("inf")
         self._schedule_ready_after = float("inf")
         self._schedule_gate = asyncio.Event()
+        self.activity = WateringActivity(self)
 
         _LOGGER.info(
             "%s - Coordinator initialization finished.",
@@ -193,33 +201,15 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         ]
 
     async def async_shutdown(self) -> None:
-        """Tear down coordinator tasks when the integration unloads.
-
-        The irrigation monitor task is cancelled first so no in-flight
-        operation races the teardown. With ``persistent_connection`` enabled
-        the client holds the BLE link between polls, so it is explicitly
-        disconnected here (bounded, so a resisting controller cannot stall
-        unload); the stateless v2 client holds no BLE session between
-        operations and closes its own connection when the monitor task is
-        cancelled.
-        """
+        """Cancel owned tasks; each BLE operation releases its own connection."""
         self.irrigation_stop_event.set()
         task = self._irrigation_monitor_task
         if task is not None and not task.done():
             task.cancel()
         await self._await_irrigation_monitor_task()
-        if self.persistent_connection:
-            try:
-                async with asyncio.timeout(PERSISTENT_DISCONNECT_TIMEOUT):
-                    await cast("PersistentSolemClient", self.api).disconnect()
-            except TimeoutError:
-                _LOGGER.warning(
-                    "%s - Persistent BLE disconnect timed out during shutdown; "
-                    "continuing teardown",
-                    self.controller_mac_address,
-                )
         self._clear_irrigation_idle_state()
         await self.schedule_coordinator.async_shutdown()
+        await self.activity.shutdown()
 
     def request_schedule_refresh(self) -> None:
         """Mark schedule data due for the next slow-coordinator refresh."""
@@ -227,6 +217,12 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     async def async_init(self) -> None:
         """Build initial entity data without blocking setup on BLE availability."""
+        await self.program_manager.load()
+        await self.station_name_manager.load()
+        await self.rainfall.load()
+        await self.activity.load()
+        if self.program_manager.snapshot:
+            self.irrigation_programs = self.program_manager.snapshot.programs
         self._ready = True
         self.data = await self.async_update_all_sensors(fetch_status=False)
         self.last_update_success = False
@@ -280,6 +276,8 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     async def async_update_data(self) -> list[dict[str, Any]]:
         try:
             data = await self.async_update_all_sensors()
+            await self.rainfall.maybe_apply()
+            data = await self.async_update_all_sensors(fetch_status=False)
             self._last_successful_poll_at = asyncio.get_running_loop().time()
             note_ble_recovery(self)
             note_cycle_outcome(self, degraded=False, reason="")
@@ -293,14 +291,14 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             raise UpdateFailed(f"Failed to update BLE status: {err}") from err
 
     async def start_irrigation(
-        self, station: int, minutes: int | None = None
+        self, station: int, minutes: int | None = None, *, context: Context | None = None
     ) -> None:
         """Send a start command, then monitor watering in the background."""
-        await irrigation_start(self, station, minutes)
+        await irrigation_start(self, station, minutes, context=context)
 
-    async def start_program(self, program_num: int) -> None:
+    async def start_program(self, program_num: int, *, context: Context | None = None) -> None:
         """Start one on-device irrigation program."""
-        await irrigation_start_program(self, program_num)
+        await irrigation_start_program(self, program_num, context=context)
 
     async def _run_irrigation_monitor(self, station: int, duration: int) -> None:
         """Monitor active watering until completion, stop, or safety timeout."""
@@ -310,19 +308,48 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Stop active manual watering."""
         await irrigation_stop(self)
 
-    async def set_irrigation_program(
-        self,
-        program_index: int,
-        program: IrrigationProgram,
-    ) -> None:
-        """Write one on-device irrigation program and refresh schedule data."""
-        self.irrigation_programs = await self.api.set_irrigation_program(
-            program_index,
-            program,
-        )
-        self.request_schedule_refresh()
-        self.async_set_updated_data(await self.async_update_all_sensors(fetch_status=False))
+    def publish_programs(self) -> None:
+        """Publish the last complete snapshot and its verification state."""
+        if self.program_manager.snapshot:
+            self.irrigation_programs = self.program_manager.snapshot.programs
+        self.async_set_updated_data(build_all_descriptors(self))
         self.schedule_coordinator.async_set_updated_data(self.irrigation_programs)
+
+    async def refresh_programs(self, *, accept_current: bool = False) -> None:
+        """Return only after a complete fresh read, propagating read failures."""
+        try:
+            await self.program_manager.refresh(accept_current=accept_current)
+        finally:
+            self.publish_programs()
+
+    async def refresh_station_names(self, *, accept_current: bool = False) -> None:
+        """Refresh the editor from onboard names without changing HA labels."""
+        await self.station_name_manager.refresh(accept_current=accept_current)
+        await self._publish_station_names()
+
+    async def rename_station(self, station: int, name: str, revision: str) -> None:
+        """Save one physical station's name, leaving all other settings alone."""
+        try:
+            await self.station_name_manager.update(station, name, revision)
+        finally:
+            await self._publish_station_names()
+
+    async def _publish_station_names(self) -> None:
+        if snapshot := self.station_name_manager.snapshot:
+            self.station_names.update({i: name for i, name in snapshot.names.items() if i <= self.num_stations})
+            for station in self.stations:
+                station.device_name = f"{self._station_name(station.station_number)} Status"
+            publish_descriptor_update(self, await self.async_update_all_sensors(fetch_status=False))
+
+    async def set_irrigation_program(
+        self, program_index: int, changes: dict[str, Any], revision: str,
+        *, require_on: bool = False,
+    ) -> None:
+        """Apply a guarded field patch; never substitute unspecified fields."""
+        try:
+            await self.program_manager.update(program_index, changes, revision, require_on=require_on)
+        finally:
+            self.publish_programs()
 
     async def turn_controller_on(self) -> None:
         """Turn the irrigation controller on."""
