@@ -7,13 +7,14 @@ from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
-from solem_blip_ble import IrrigationProgram
+from .ble import IrrigationProgram
 
 from .config_entry import MyConfigEntry
+from .controller_name import CONTROLLER_NAME
 from .const import CONTROLLER_MAC_ADDRESS, PROGRAM_LABELS
 from .coordinator_polling import active_program_name
 
-_TO_REDACT = {CONTROLLER_MAC_ADDRESS}
+_TO_REDACT = {CONTROLLER_MAC_ADDRESS, CONTROLLER_NAME}
 
 
 def _program_diagnostic_name(program: IrrigationProgram | None) -> str | None:
@@ -48,9 +49,20 @@ async def async_get_config_entry_diagnostics(
         "available": coordinator.last_update_success,
         "last_update_success": coordinator.last_update_success,
         "last_poll_age_seconds": last_poll_age,
+        "last_time_sync": coordinator._last_set_time_sync,
         "firmware_version": coordinator.firmware_version,
         "station_count": coordinator.num_stations,
         "station_names_loaded": len(coordinator.station_names),
+        "station_name_write": {
+            "pending": bool(coordinator.station_name_manager.pending),
+            "last_write": coordinator.station_name_manager.last_write,
+            "transport": coordinator.api.station_name_write_diagnostics,
+        },
+        "program_write": {
+            "pending": bool(coordinator.program_manager.pending),
+            "last_write": coordinator.program_manager.last_write,
+            "transport": coordinator.api.program_write_diagnostics,
+        },
         "program_names": program_names,
         "battery": {
             "level": coordinator.battery_level,

@@ -10,6 +10,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.solem_blip import RuntimeData
 from custom_components.solem_blip.const import CONTROLLER_MAC_ADDRESS
+from custom_components.solem_blip.controller_name import CONTROLLER_NAME
 from custom_components.solem_blip.diagnostics import async_get_config_entry_diagnostics
 
 
@@ -18,6 +19,10 @@ async def test_diagnostics_redact_mac_and_include_runtime_state(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
     """Diagnostics redact the configured MAC and expose useful coordinator state."""
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry, data={**mock_config_entry.data, CONTROLLER_NAME: "Garden unit"}
+    )
     coordinator = MagicMock()
     coordinator.last_update_success = True
     coordinator.firmware_version = "5.1.7"
@@ -51,6 +56,7 @@ async def test_diagnostics_redact_mac_and_include_runtime_state(
     result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
 
     assert result["config_entry"][CONTROLLER_MAC_ADDRESS] == "**REDACTED**"
+    assert result["config_entry"][CONTROLLER_NAME] == "**REDACTED**"
     assert result["firmware_version"] == "5.1.7"
     assert result["station_count"] == 6
     assert result["station_names_loaded"] == 2

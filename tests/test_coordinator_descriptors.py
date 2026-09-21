@@ -166,7 +166,7 @@ class TestEntitySetup:
                 "program_name": "Programma A"
             }
             assert schedules[0]["state"] == (
-                "17:40 · Station 1 20 min, Station 5 30 min"
+                "17:40 · Station 1 20 min"
             )
             assert schedules[0]["attributes"]["enabled_start_count"] == 1
             assert coordinator.irrigation_programs[0]["name"] == "Programma A"

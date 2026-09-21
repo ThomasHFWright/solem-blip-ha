@@ -1,0 +1,210 @@
+"""Source attribution uses command evidence and observed transitions only."""
+from datetime import timedelta
+from unittest.mock import AsyncMock
+
+import pytest
+from homeassistant.core import Context
+from homeassistant.util import dt as dt_util
+
+from custom_components.solem_blip.activity import WateringActivity
+
+IDLE = {"is_watering": False, "active_program": None, "station_num": None}
+RUN = {"is_watering": True, "active_program": 1, "station_num": 1}
+
+
+@pytest.fixture
+async def activity(coordinator, freezer):
+    freezer.move_to("2026-09-18T12:00:00+00:00")
+    await coordinator.refresh_programs()
+    coordinator.irrigation_programs[0].update(cycle=0, week_days=127, start_times=[720]+[None]*7)
+    return coordinator.activity
+
+
+def observe_start(activity, freezer, status=None, seconds=60):
+    activity.observe(IDLE)
+    freezer.tick(timedelta(seconds=seconds))
+    activity.observe(status or RUN)
+    return activity.current
+
+
+async def test_scheduled_transitions_station_changes_delays_and_finish(activity, freezer):
+    # Compare the configured slot in HA local time.
+    freezer.move_to("2026-09-18T11:59:00+00:00")
+    activity.c.program_manager.last_read = dt_util.utcnow().isoformat()
+    at_start = dt_util.now() + timedelta(minutes=1)
+    activity.c.irrigation_programs[0]["start_times"] = [at_start.hour * 60 + at_start.minute] + [None]*7
+    assert observe_start(activity, freezer)['source'] == 'Scheduled'
+    activity.observe({**RUN, 'station_num': 2})
+    activity.observe({**RUN, 'station_num': None, 'is_watering': False})
+    assert activity.current['stations'] == [1, 2]
+    assert not activity.history
+    freezer.tick(timedelta(seconds=60))
+    activity.observe(IDLE)
+    assert activity.current is None
+    assert activity.history[0]['outcome'] == 'Finished'
+    assert activity.history[0]['finished_detected'] == dt_util.utcnow().isoformat()
+    assert 'confidence' not in activity.history[0]
+
+
+async def test_external_program_and_individual_station(activity, freezer):
+    activity.c.irrigation_programs[0]['start_times'] = [180]+[None]*7
+    assert observe_start(activity, freezer)['source'] == 'Manual Bluetooth'
+    activity.observe(IDLE)
+    activity.observe({'is_watering': True, 'station_num': 3, 'watering_origin': 'manual'})
+    assert activity.current['source'] == 'Manual Bluetooth'
+    assert activity.current['program'] is None
+
+
+@pytest.mark.parametrize('cause', ['initial', 'gap', 'interval', 'no_program', 'stale', 'clock', 'revision', 'pending', 'unidentified'])
+async def test_ambiguous_runs_are_unknown(activity, freezer, cause):
+    activity.observe(IDLE)
+    status = dict(RUN)
+    if cause == 'initial': activity.last_seen = None
+    if cause == 'gap': freezer.tick(timedelta(minutes=10))
+    if cause == 'interval': activity.c.irrigation_programs[0]['cycle'] = 4
+    if cause == 'no_program': activity.c.irrigation_programs = {}
+    if cause == 'stale': activity.c.program_manager.last_read = None
+    if cause == 'clock': status['time_alarm'] = True
+    if cause == 'revision': activity.last_revision = 'old'
+    if cause == 'pending': activity.c.program_manager.pending = {'pending': True}
+    if cause == 'unidentified': status['active_program'] = None
+    activity.observe(status)
+    assert activity.current['source'] == 'Unknown'
+
+
+async def test_gap_and_restart_do_not_invent_finish_time(activity, freezer):
+    observe_start(activity, freezer)
+    freezer.tick(timedelta(minutes=10))
+    activity.observe(RUN)
+    assert activity.current['source'] == 'Unknown'
+    assert activity.history[0]['outcome'] == 'Observation interrupted'
+    assert activity.history[0]['finished_detected'] is None
+    stored = activity._stored()
+    replacement = WateringActivity(activity.c)
+    replacement.store.async_load = AsyncMock(return_value=stored)
+    await replacement.load()
+    assert replacement.current is None
+    replacement.observe(RUN)
+    assert replacement.current['source'] == 'Unknown'
+    await replacement.shutdown()
+    assert replacement.history[0]['finished_detected'] is None
+    empty = WateringActivity(activity.c)
+    empty.store.async_load = AsyncMock(return_value=None)
+    await empty.load()
+    await empty.shutdown()
+
+
+async def test_ha_command_attribution_context_and_matching(activity, freezer, hass_admin_user):
+    context = Context(user_id=hass_admin_user.id)
+    activity.observe(IDLE)
+    async with activity.command(program=1, context=context):
+        assert activity.pending['confirmed'] is False
+    activity.observe(RUN)
+    assert activity.current['source'] == 'Manual Home Assistant'
+    assert activity.current['user_id'] == hass_admin_user.id
+    assert activity.current['actor'] == hass_admin_user.name
+    assert activity.current['context_id'] == context.id
+    assert activity.pending is None
+    activity.observe({**RUN, 'station_num': 2})
+    assert not activity.history
+    async with activity.command(station=3): pass
+    activity.observe({'is_watering': True, 'station_num': 3})
+    assert activity.history[0]['outcome'] == 'Run replaced'
+    assert activity.current['source'] == 'Manual Home Assistant'
+
+
+@pytest.mark.parametrize('failure', [RuntimeError, __import__('asyncio').CancelledError])
+async def test_uncertain_command_never_becomes_external_or_confirmed(activity, failure):
+    activity.observe(IDLE)
+    with pytest.raises(failure):
+        async with activity.command(program=1):
+            raise failure()
+    activity.observe(RUN)
+    assert activity.current['source'] == 'Unknown'
+
+
+async def test_expired_and_mismatched_commands(activity, freezer):
+    async with activity.command(program=2): pass
+    activity.observe(RUN)
+    assert activity.current['source'] == 'Unknown'
+    activity.observe(IDLE)
+    freezer.tick(timedelta(minutes=6))
+    activity.observe(IDLE)
+    activity.c.irrigation_programs[0]['start_times'] = [180]+[None]*7
+    activity.observe(RUN)
+    assert activity.current['source'] == 'Manual Bluetooth'
+    assert activity.pending is None
+
+
+async def test_program_replacement_bounded_history_and_copy(activity):
+    activity.observe(RUN)
+    activity.observe({**RUN, 'active_program': 2})
+    assert activity.history[0]['outcome'] == 'Run replaced'
+    for _ in range(35):
+        activity.observe(IDLE)
+        activity.observe(RUN)
+    assert len(activity.history) == 30
+    display = activity.state
+    display['history'].clear()
+    display['current']['stations'].clear()
+    assert len(activity.history) == 30
+    assert activity.current['stations'] == [1]
+
+
+async def test_schedule_timezone_midnight_and_weekdays(activity, freezer):
+    # UTC 23:00 is midnight the next day in Lisbon.
+    old_zone = dt_util.DEFAULT_TIME_ZONE
+    dt_util.set_default_time_zone(dt_util.get_time_zone('Europe/Lisbon'))
+    try:
+        freezer.move_to('2026-09-18T22:59:00+00:00')
+        activity.c.program_manager.last_read = dt_util.utcnow().isoformat()
+        activity.c.irrigation_programs[0].update(start_times=[0]+[None]*7, week_days=1 << 5)
+        assert observe_start(activity, freezer)['source'] == 'Scheduled'
+        activity.observe(IDLE)
+        activity.c.irrigation_programs[0]['week_days'] = 1 << 4
+        activity.observe(RUN)
+        assert activity.current['source'] == 'Manual Bluetooth'
+    finally:
+        dt_util.set_default_time_zone(old_zone)
+
+
+async def test_pending_recovery_and_storage_failure_prevent_false_attribution(activity):
+    async with activity.command(program=1, context=Context(user_id='missing-user')): pass
+    stored = activity._stored()
+    replacement = WateringActivity(activity.c)
+    replacement.store.async_load = AsyncMock(return_value=stored)
+    await replacement.load()
+    replacement.observe(RUN)
+    assert replacement.current['source'] == 'Unknown'
+    activity.store.async_save = AsyncMock(side_effect=OSError('disk full'))
+    sent = False
+    with pytest.raises(OSError):
+        async with activity.command(station=1):
+            sent = True
+    assert not sent
+
+
+async def test_logs_and_commands_are_passive(activity, freezer):
+    events = []
+    remove = activity.c.hass.bus.async_listen('logbook_entry', lambda event: events.append(event))
+    activity.observe(IDLE)
+    async with activity.command(program=1): pass
+    activity.observe(RUN)
+    activity.observe(IDLE)
+    await activity.c.hass.async_block_till_done()
+    remove()
+    assert [e.data['message'] for e in events] == [
+        'Started: Manual Home Assistant — Program A', 'Finished: Manual Home Assistant'
+    ]
+    activity.c.api.get_status.assert_not_awaited()
+    activity.c.api.run_program_x.assert_not_awaited()
+
+
+async def test_idle_after_ha_attempt_cannot_claim_a_later_external_start(activity):
+    activity.observe(IDLE)
+    async with activity.command(program=1): pass
+    activity.observe(IDLE)
+    assert activity.pending is None
+    activity.c.irrigation_programs[0]['start_times'] = [180]+[None]*7
+    activity.observe(RUN)
+    assert activity.current['source'] == 'Manual Bluetooth'

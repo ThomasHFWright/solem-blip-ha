@@ -8,6 +8,7 @@ import logging
 from asyncio import sleep
 from typing import TYPE_CHECKING
 
+from homeassistant.core import Context
 from homeassistant.exceptions import HomeAssistantError
 
 from .api import APIConnectionError
@@ -128,7 +129,7 @@ async def run_irrigation_monitor(
 
 
 async def start_irrigation(
-    coordinator: SolemCoordinator, station: int, minutes: int | None = None
+    coordinator: SolemCoordinator, station: int, minutes: int | None = None, *, context: Context | None = None
 ) -> None:
     """Send a start command, then monitor watering in the background."""
     if coordinator._irrigation_active:
@@ -145,7 +146,8 @@ async def start_irrigation(
     )
 
     try:
-        await coordinator.api.sprinkle_station_x_for_y_minutes(station, duration)
+        async with coordinator.activity.command(station=station, context=context):
+            await coordinator.api.sprinkle_station_x_for_y_minutes(station, duration)
         coordinator.irrigation_stop_event.clear()
         coordinator._irrigation_active = True
         coordinator.async_set_updated_data(await coordinator.async_update_all_sensors())
@@ -182,7 +184,7 @@ async def start_irrigation(
         raise
 
 
-async def start_program(coordinator: SolemCoordinator, program_num: int) -> None:
+async def start_program(coordinator: SolemCoordinator, program_num: int, *, context: Context | None = None) -> None:
     """Start one on-device irrigation program."""
     if coordinator._irrigation_active:
         raise APIConnectionError("Irrigation is already in progress")
@@ -196,7 +198,8 @@ async def start_program(coordinator: SolemCoordinator, program_num: int) -> None
     )
 
     try:
-        await coordinator.api.run_program_x(program_num)
+        async with coordinator.activity.command(program=program_num, context=context):
+            await coordinator.api.run_program_x(program_num)
     except APIConnectionError as ex:
         _LOGGER.error(
             "%s - Failed to start program %s due to connection error.",

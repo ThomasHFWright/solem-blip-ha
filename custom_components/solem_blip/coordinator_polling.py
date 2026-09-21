@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from datetime import datetime
+from homeassistant.util import dt as dt_util
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers import device_registry as dr
 
+from .controller_name import apply_controller_name
 from .const import (
     DOMAIN,
     HEAVY_READ_DEFER_SECONDS,
@@ -53,6 +54,7 @@ def apply_status(coordinator: SolemCoordinator, status: dict[str, Any]) -> None:
     coordinator.controller_off_days_remaining = status.get(
         "controller_off_days_remaining"
     )
+    coordinator.activity.observe(status)
     coordinator._has_status = True
     coordinator._is_watering = bool(status.get("is_watering"))
     active_program = status.get("active_program")
@@ -122,7 +124,7 @@ async def maybe_set_device_time(coordinator: SolemCoordinator) -> None:
     """Push HA local time to the device when throttling allows."""
     if coordinator.solem_api_mock or coordinator.api.mock:
         return
-    if coordinator._irrigation_active:
+    if coordinator._irrigation_active or coordinator._is_watering:
         return
 
     now = asyncio.get_running_loop().time()
@@ -133,7 +135,7 @@ async def maybe_set_device_time(coordinator: SolemCoordinator) -> None:
     ):
         return
 
-    moment = datetime.now().astimezone()
+    moment = dt_util.now()
     try:
         await coordinator.api.set_time(moment)
     except Exception as err:
@@ -183,6 +185,8 @@ async def _fetch_device_metadata_locked(coordinator: SolemCoordinator) -> None:
             )
             firmware_failed = True
         else:
+            if name := firmware.get("controller_name"):
+                apply_controller_name(coordinator, name)
             coordinator.firmware_version = firmware["raw_hex"]
             coordinator.controller.software_version = coordinator.firmware_version
             for station in coordinator.stations:
@@ -278,7 +282,7 @@ async def fetch_irrigation_config(coordinator: SolemCoordinator) -> None:
 
 async def _fetch_irrigation_config_locked(coordinator: SolemCoordinator) -> None:
     """Read irrigation programs while holding the heavy-read lock."""
-    if coordinator._irrigation_active:
+    if coordinator._irrigation_active or coordinator._is_watering:
         return
 
     now = asyncio.get_running_loop().time()
@@ -290,7 +294,7 @@ async def _fetch_irrigation_config_locked(coordinator: SolemCoordinator) -> None
 
     try:
         programs = await asyncio.wait_for(
-            coordinator.api.get_irrigation_config(),
+            coordinator.program_manager.refresh(),
             timeout=IRRIGATION_CONFIG_READ_TIMEOUT,
         )
     except Exception as err:
@@ -308,7 +312,7 @@ async def _fetch_irrigation_config_locked(coordinator: SolemCoordinator) -> None
         return
 
     coordinator.irrigation_programs = {
-        index: programs[index] for index in (0, 1, 2) if index in programs
+        index: programs.programs[index] for index in (0, 1, 2)
     }
     coordinator._irrigation_config_refresh_after = (
         now + IRRIGATION_CONFIG_REFRESH_INTERVAL
@@ -319,10 +323,9 @@ async def _fetch_irrigation_config_locked(coordinator: SolemCoordinator) -> None
 
 async def fetch_device_status(coordinator: SolemCoordinator) -> dict[str, Any]:
     """Poll device and update controller/station states from BLE status."""
-    if not coordinator._irrigation_active:
-        await maybe_set_device_time(coordinator)
     status = await coordinator.api.get_status()
     apply_status(coordinator, status)
+    await maybe_set_device_time(coordinator)
     _mark_first_successful_status_poll(coordinator)
     if not coordinator._irrigation_active and _heavy_reads_ready(coordinator):
         config_entry = coordinator.config_entry

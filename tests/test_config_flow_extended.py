@@ -35,7 +35,7 @@ from custom_components.solem_blip.const import (
     PERSISTENT_CONNECTION,
     SOLEM_API_MOCK,
 )
-from solem_blip_ble import SolemConnectionError
+from custom_components.solem_blip.ble import SolemConnectionError
 from tests.conftest import MOCK_IRRIGATION_PROGRAMS
 
 
@@ -248,6 +248,53 @@ async def test_user_step_creates_entry(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_address_without_service_advertisement(hass: HomeAssistant) -> None:
+    """A known, connectable controller can be entered without UUID discovery."""
+    flow = SolemConfigFlow()
+    flow.hass = hass
+    flow.context = {}
+    flow.async_set_unique_id = AsyncMock()
+    flow._abort_if_unique_id_configured = MagicMock()
+    flow.async_create_entry = MagicMock(return_value={"type": "create_entry"})
+    with patch(
+        "custom_components.solem_blip.config_flow.async_scan_devices",
+        new=AsyncMock(return_value=[]),
+    ):
+        form = await flow.async_step_user()
+    data = form["data_schema"]({
+        CONTROLLER_MAC_ADDRESS: "aa:bb:cc:dd:ee:ff", NUM_STATIONS: 6,
+    })
+    with patch(
+        "custom_components.solem_blip.config_flow.validate_input",
+        new=AsyncMock(return_value={"title": "Solem BL-IP"}),
+    ) as validate:
+        await flow.async_step_user(data)
+    validate.assert_awaited_once_with(hass, {
+        CONTROLLER_MAC_ADDRESS: "Solem BL-IP - AA:BB:CC:DD:EE:FF", NUM_STATIONS: 6,
+    })
+    flow.async_set_unique_id.assert_awaited_once_with("AA:BB:CC:DD:EE:FF")
+
+
+@pytest.mark.asyncio
+async def test_invalid_manual_address_does_not_connect(hass: HomeAssistant) -> None:
+    """Malformed custom values are rejected before attempting Bluetooth."""
+    flow = SolemConfigFlow()
+    flow.hass = hass
+    flow.context = {}
+    with patch(
+        "custom_components.solem_blip.config_flow.async_scan_devices",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "custom_components.solem_blip.config_flow.validate_input", new=AsyncMock(),
+    ) as validate:
+        result = await flow.async_step_user({
+            CONTROLLER_MAC_ADDRESS: "not a controller", NUM_STATIONS: 6,
+        })
+    assert result["errors"]["base"] == "cannot_connect"
+    validate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("exc", "error_key"),
     [
@@ -415,7 +462,7 @@ async def test_options_flow_shows_menu(
 
     assert result["type"] == "menu"
     assert result["step_id"] == "init"
-    assert result["menu_options"] == [MENU_SETTINGS, MENU_EDIT_PROGRAM]
+    assert result["menu_options"] == [MENU_SETTINGS, MENU_EDIT_PROGRAM, "station_select", "rainfall"]
 
 
 @pytest.mark.parametrize(
@@ -522,7 +569,7 @@ async def test_options_flow_settings_persists_persistent_connection(
         return_value=mock_config_entry,
     ):
         shown = await handler.async_step_settings()
-        assert PERSISTENT_CONNECTION in shown["data_schema"].schema
+        assert PERSISTENT_CONNECTION not in shown["data_schema"].schema
 
         result = await handler.async_step_settings(
             {
@@ -553,12 +600,7 @@ async def test_options_flow_settings_persistent_connection_default_off(
         result = await handler.async_step_settings()
 
     assert result["type"] == "form"
-    marker = next(
-        key
-        for key in result["data_schema"].schema
-        if getattr(key, "schema", None) == PERSISTENT_CONNECTION
-    )
-    assert marker.default() is False
+    assert PERSISTENT_CONNECTION not in result["data_schema"].schema
 
 
 @pytest.mark.asyncio
@@ -604,6 +646,8 @@ async def test_options_flow_program_select_continues_to_editor(
     coordinator.irrigation_programs = dict(MOCK_IRRIGATION_PROGRAMS)
     coordinator._irrigation_active = False
     coordinator._is_watering = False
+    coordinator.refresh_programs = AsyncMock()
+    coordinator.program_manager.revision = "draft-revision"
     coordinator.set_irrigation_program = AsyncMock()
     mock_config_entry.runtime_data = RuntimeData(coordinator)
     handler = SolemOptionsFlowHandler()
@@ -651,6 +695,8 @@ async def test_options_flow_program_edit_writes_program(
     coordinator.irrigation_programs = dict(MOCK_IRRIGATION_PROGRAMS)
     coordinator._irrigation_active = False
     coordinator._is_watering = False
+    coordinator.refresh_programs = AsyncMock()
+    coordinator.program_manager.revision = "draft-revision"
     coordinator.set_irrigation_program = AsyncMock()
     mock_config_entry.runtime_data = RuntimeData(coordinator)
     handler = SolemOptionsFlowHandler()
@@ -665,14 +711,15 @@ async def test_options_flow_program_edit_writes_program(
 
     assert result["type"] == "create_entry"
     coordinator.set_irrigation_program.assert_awaited_once()
-    program_index, program = coordinator.set_irrigation_program.await_args.args
+    program_index, program, revision = coordinator.set_irrigation_program.await_args.args
+    assert revision == "draft-revision"
     assert program_index == 1
     assert program["name"] == "Vasi"
-    assert program["cycle"] == 4
+    assert "cycle" not in program # unchanged fields are omitted
     assert program["week_days"] == 0x05
     assert program["period_start_date"] == date(2026, 6, 18)
     assert program["start_times"] == [390, None, None, None, None, None, None, None]
-    assert program["station_durations"] == [0, 120]
+    assert program["station_durations"] == {2: 120}
 
 
 def test_options_flow_program_edit_preserves_synchro_day_when_start_date_unchanged() -> None:
@@ -692,7 +739,7 @@ def test_options_flow_program_edit_preserves_synchro_day_when_start_date_unchang
     assert program["synchro_day"] == 1
 
 
-def test_options_flow_program_edit_derives_synchro_day_from_current_anchor() -> None:
+def test_options_flow_program_edit_preserves_explicit_phase_with_new_date() -> None:
     """Changing the desired start date shifts phase from the controller anchor."""
     handler = SolemOptionsFlowHandler()
     current_program = {
@@ -713,10 +760,10 @@ def test_options_flow_program_edit_derives_synchro_day_from_current_anchor() -> 
     )
 
     assert program["period_start_date"] == date(2026, 6, 28)
-    assert program["synchro_day"] == 1
+    assert program["synchro_day"] == 0
 
 
-def test_options_flow_program_edit_resets_synchro_day_without_current_anchor() -> None:
+def test_options_flow_program_edit_keeps_explicit_phase_without_current_anchor() -> None:
     """Changing the period start uses zero phase when no read-back anchor exists."""
     handler = SolemOptionsFlowHandler()
 
@@ -730,7 +777,7 @@ def test_options_flow_program_edit_resets_synchro_day_without_current_anchor() -
         current_program=None,
     )
 
-    assert program["synchro_day"] == 0
+    assert program["synchro_day"] == 1
 
 
 @pytest.mark.asyncio
@@ -745,6 +792,8 @@ async def test_options_flow_program_edit_writes_named_station_fields(
     coordinator.irrigation_programs = dict(MOCK_IRRIGATION_PROGRAMS)
     coordinator._irrigation_active = False
     coordinator._is_watering = False
+    coordinator.refresh_programs = AsyncMock()
+    coordinator.program_manager.revision = "draft-revision"
     coordinator.set_irrigation_program = AsyncMock()
     mock_config_entry.runtime_data = RuntimeData(coordinator)
     handler = SolemOptionsFlowHandler()
@@ -763,8 +812,8 @@ async def test_options_flow_program_edit_writes_named_station_fields(
         result = await handler.async_step_program_edit(user_input)
 
     assert result["type"] == "create_entry"
-    _, program = coordinator.set_irrigation_program.await_args.args
-    assert program["station_durations"] == [0, 120]
+    _, program, _ = coordinator.set_irrigation_program.await_args.args
+    assert program["station_durations"] == {2: 120}
 
 
 def test_options_flow_program_edit_defaults_show_duration_minutes() -> None:
@@ -838,6 +887,8 @@ async def test_options_flow_program_edit_rejects_active_watering(
     coordinator.irrigation_programs = dict(MOCK_IRRIGATION_PROGRAMS)
     coordinator._irrigation_active = True
     coordinator._is_watering = False
+    coordinator.refresh_programs = AsyncMock()
+    coordinator.program_manager.revision = "draft-revision"
     coordinator.set_irrigation_program = AsyncMock()
     mock_config_entry.runtime_data = RuntimeData(coordinator)
     handler = SolemOptionsFlowHandler()
@@ -866,6 +917,8 @@ async def test_options_flow_program_edit_rejects_invalid_time(
     coordinator.irrigation_programs = dict(MOCK_IRRIGATION_PROGRAMS)
     coordinator._irrigation_active = False
     coordinator._is_watering = False
+    coordinator.refresh_programs = AsyncMock()
+    coordinator.program_manager.revision = "draft-revision"
     coordinator.set_irrigation_program = AsyncMock()
     mock_config_entry.runtime_data = RuntimeData(coordinator)
     handler = SolemOptionsFlowHandler()
@@ -895,6 +948,8 @@ async def test_options_flow_program_edit_reports_write_failure(
     coordinator.irrigation_programs = dict(MOCK_IRRIGATION_PROGRAMS)
     coordinator._irrigation_active = False
     coordinator._is_watering = False
+    coordinator.refresh_programs = AsyncMock()
+    coordinator.program_manager.revision = "draft-revision"
     coordinator.set_irrigation_program = AsyncMock(side_effect=RuntimeError("boom"))
     mock_config_entry.runtime_data = RuntimeData(coordinator)
     handler = SolemOptionsFlowHandler()
@@ -934,3 +989,116 @@ async def test_bluetooth_step_aborts_duplicate(hass: HomeAssistant) -> None:
         await flow.async_step_bluetooth(
             SimpleNamespace(address="aa:bb:cc:dd:ee:ff", name="Solem BL-IP")
         )
+
+
+@pytest.mark.asyncio
+async def test_rainfall_options_require_reviewed_normal_budget(coordinator, mock_config_entry):
+    """Opt-in configuration captures program identity without issuing writes."""
+    mock_config_entry.runtime_data = RuntimeData(coordinator)
+    handler = SolemOptionsFlowHandler()
+    data = {"sensor":"sensor.rain", "target_mm":4, "max_age_minutes":60,
+            "programs":["0"], "automatic":False, "whole_controller_delay":False,
+            "baseline_0":100, "baseline_1":100, "baseline_2":100}
+    with patch.object(SolemOptionsFlowHandler, "config_entry", new_callable=PropertyMock, return_value=mock_config_entry):
+        shown=await handler.async_step_rainfall()
+        assert shown['step_id']=='rainfall'
+        result=await handler.async_step_rainfall(data)
+        assert result['type']=='create_entry'
+        assert result['data']['rainfall']['baselines']=={'0':100}
+        assert len(result['data']['rainfall']['fingerprints']['0'])==64
+        failed=await handler.async_step_rainfall({**data,'baseline_0':80})
+        assert failed['errors']['base']=='rainfall_baseline'
+        coordinator.program_manager.pending={'uncertain':True}
+        coordinator.refresh_programs=AsyncMock()
+        failed=await handler.async_step_rainfall(data)
+        assert failed['errors']['base']=='rainfall_baseline'
+        disabled=await handler.async_step_rainfall({**data,'programs':[]})
+        assert disabled['data']['rainfall']['programs']==[]
+    coordinator.api.write_program_frames.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_program_draft_keeps_revision_when_poll_changes(coordinator, mock_config_entry):
+    """Saving submits the original revision and only the intended field patch."""
+    mock_config_entry.runtime_data = RuntimeData(coordinator)
+    handler = SolemOptionsFlowHandler()
+    handler._selected_program_index = 1
+    with patch.object(SolemOptionsFlowHandler, "config_entry", new_callable=PropertyMock, return_value=mock_config_entry):
+        await handler.async_step_program_edit()
+        revision=handler._draft_revision
+        draft=handler._draft.copy()
+        coordinator.irrigation_programs[1]={**coordinator.irrigation_programs[1], 'name':'Phone edit'}
+        coordinator.set_irrigation_program=AsyncMock()
+        result=await handler.async_step_program_edit(_program_editor_input())
+        assert result['type']=='create_entry'
+        assert coordinator.set_irrigation_program.await_args.args[2]==revision
+        assert handler._draft==draft
+
+
+@pytest.mark.asyncio
+async def test_failed_editor_read_aborts_without_blank_edit(coordinator,mock_config_entry):
+    mock_config_entry.runtime_data = RuntimeData(coordinator)
+    coordinator.refresh_programs=AsyncMock(side_effect=RuntimeError('unavailable'))
+    handler=SolemOptionsFlowHandler()
+    with patch.object(SolemOptionsFlowHandler,'config_entry',new_callable=PropertyMock,return_value=mock_config_entry):
+        result=await handler.async_step_program_edit()
+    assert result['type']=='abort' and result['reason']=='program_read_failed'
+
+
+@pytest.mark.parametrize("selection", [None, "2", "3"])
+async def test_program_selection_validates_ui_defaults_before_read_only_editor(
+    hass, mock_config_entry, selection,
+):
+    """Submitting the unchanged default must validate exactly like a UI choice."""
+    mock_config_entry.add_to_hass(hass)
+    coordinator = MagicMock()
+    coordinator.num_stations = 2
+    coordinator.irrigation_programs = dict(MOCK_IRRIGATION_PROGRAMS)
+    coordinator.refresh_programs = AsyncMock()
+    coordinator.set_irrigation_program = AsyncMock()
+    coordinator.program_manager.revision = "fresh-revision"
+    mock_config_entry.runtime_data = RuntimeData(coordinator)
+    handler = SolemOptionsFlowHandler()
+    with patch.object(
+        SolemOptionsFlowHandler, "config_entry", new_callable=PropertyMock,
+        return_value=mock_config_entry,
+    ):
+        form = await handler.async_step_program_select()
+        fields = to_field_list(form["data_schema"], custom_serializer=cv.custom_serializer)
+        default = next(field["default"] for field in fields if field["name"] == "program")
+        # Model both an omitted field (server default) and the unchanged UI value.
+        if selection is None:
+            assert form["data_schema"]({}) == {"program": "1"}
+        submitted = form["data_schema"]({"program": default if selection is None else selection})
+        result = await handler.async_step_program_select(submitted)
+    assert result["step_id"] == "program_edit"
+    assert not result["errors"]
+    assert handler._selected_program_index == int(selection or "1") - 1
+    assert handler._draft_revision == "fresh-revision"
+    coordinator.refresh_programs.assert_awaited_once()
+    coordinator.set_irrigation_program.assert_not_awaited()
+
+
+async def test_rainfall_explicit_review_retains_original_baseline_after_program_change(coordinator, mock_config_entry):
+    from copy import deepcopy
+    mock_config_entry.add_to_hass(coordinator.hass)
+    mock_config_entry.runtime_data = RuntimeData(coordinator)
+    handler = SolemOptionsFlowHandler()
+    current = {'baselines':{'0':100}, 'fingerprints':{'0':'old fingerprint'}}
+    coordinator.hass.config_entries.async_update_entry(mock_config_entry, options={'rainfall':current})
+    await coordinator.refresh_programs()
+    coordinator.irrigation_programs = deepcopy(coordinator.irrigation_programs)
+    coordinator.irrigation_programs[0]['water_budget'] = 95
+    coordinator.irrigation_programs[0]['name'] = 'Reviewed new program'
+    coordinator.rainfall.state['expected_budgets'] = {'0':95}
+    coordinator.refresh_programs = AsyncMock()
+    data = {'sensor':'sensor.rain','target_mm':4,'max_age_minutes':60,'programs':['0'],
+            'automatic':True,'timing':'before_program','whole_controller_delay':False,'baseline_0':100,'baseline_1':100,'baseline_2':100}
+    with patch.object(SolemOptionsFlowHandler,'config_entry',new_callable=PropertyMock,return_value=mock_config_entry):
+        result = await handler.async_step_rainfall(data)
+        assert result['data']['rainfall']['baselines'] == {'0':100}
+        assert result['data']['rainfall']['timing'] == 'before_program'
+        coordinator.irrigation_programs[0]['water_budget'] = 80
+        result = await handler.async_step_rainfall(data)
+        assert result['errors']['base'] == 'rainfall_baseline'
+    coordinator.api.write_program_frames.assert_not_awaited()

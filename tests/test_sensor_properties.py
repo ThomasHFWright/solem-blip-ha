@@ -107,6 +107,14 @@ async def test_controller_status_sensor_exposes_program_attributes(
         "watering_origin": "program",
         "controller_off_mode": "temporary",
         "controller_off_days_remaining": 3,
+        "program_revision": None,
+        "programs_last_read": None,
+        "programs_last_write": None,
+        "program_write_uncertain": False,
+        "program_error": None,
+        "rainfall_status": "disabled",
+        "rainfall": coordinator.rainfall.dashboard_state,
+        "watering_activity": coordinator.activity.state,
     }
 
 
