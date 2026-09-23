@@ -287,7 +287,7 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             return data
         except Exception as err:
-            note_cycle_outcome(self, degraded=True, reason="status poll failed")
+            note_cycle_outcome(self, degraded=True, reason=f"status poll failed: {str(err) or type(err).__name__}")
             raise UpdateFailed(f"Failed to update BLE status: {err}") from err
 
     async def start_irrigation(

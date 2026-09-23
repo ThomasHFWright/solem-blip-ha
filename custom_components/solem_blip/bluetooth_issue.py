@@ -79,10 +79,9 @@ def note_ble_degradation(
         coordinator._ble_issue_active = True
         _LOGGER.warning(
             "%s - BLE health degraded: %d failures in the last %d minutes "
-            "(latest: %s). If the problem persists, check the controller's "
-            "battery and radio range; rebooting a Bluetooth proxy, or "
-            "restarting Home Assistant (which reloads the Bluetooth "
-            "adapter), typically resolves it.",
+            "(latest: %s). Automatic cleanup and connection retries remain "
+            "enabled. Check the controller's battery, radio range and "
+            "Bluetooth proxy availability.",
             coordinator.controller_mac_address,
             len(coordinator._ble_health_events),
             WINDOW_SECONDS // 60,

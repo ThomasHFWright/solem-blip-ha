@@ -500,51 +500,25 @@ async def test_teardown_hint_does_not_poison_next_operation(
 
 
 async def test_ble_device_cache_expires(monkeypatch) -> None:
-    """Resolve is skipped while the cache is fresh, and re-run after expiry."""
-    fake_connect = asyncio.Event()
-
-    async def fake_connect_impl(self):
-        return FakeV2Client()
-
-    monkeypatch.setattr(StatelessSolemClient, "_connect", fake_connect_impl)
+    """Standalone scanning retains its cache; HA routing is always resolved fresh."""
+    from unittest.mock import AsyncMock
+    from custom_components.solem_blip.ble import client_v2 as module
 
     client = StatelessSolemClient("AA:BB:CC:DD:EE:FF")
-    fresh_device = object()  # type: ignore[assignment]
-    client._ble_device = fresh_device
+    fresh = BLEDevice(client.mac_address, "Test", {})
+    replacement = BLEDevice(client.mac_address, "Test", {})
+    client._ble_device = fresh
     client._ble_device_cached_at = time.monotonic()
-
-    resolves: list[BLEDevice | None] = []
-
-    def counting_resolver() -> BLEDevice | None:
-        resolves.append(None)
-        return None  # resolver yields nothing -> connect fails
-
-    client._ble_device_resolver = counting_resolver  # type: ignore[assignment]
-
-    # Fresh cache: the resolver is not consulted at connect time.
-    await client._connect()
-    assert len(resolves) == 0
-    assert client._ble_device is fresh_device
-
-    # Expired cache: re-resolve consults the resolver; with a resolver that
-    # yields nothing, resolution fails.
-    client._ble_device_cached_at = time.monotonic() - 60.0
+    scan = AsyncMock(return_value=replacement)
+    monkeypatch.setattr(module.BleakScanner, "find_device_by_address", scan)
+    assert await client._resolve_ble_device() is fresh
+    scan.assert_not_awaited()
+    client._ble_device_cached_at -= 60
+    assert await client._resolve_ble_device() is replacement
+    scan.assert_awaited_once()
+    client._ble_device_resolver = lambda: None
     with pytest.raises(SolemConnectionError):
         await client._resolve_ble_device()
-    assert len(resolves) == 1
-
-    # Resolver returning a device: re-resolve succeeds and refreshes the cache.
-    fresh2 = object()
-
-    def resolver_with_device() -> BLEDevice | None:
-        resolves.append(None)
-        return fresh2  # type: ignore[return-value]
-
-    client._ble_device_resolver = resolver_with_device  # type: ignore[assignment]
-    device = await client._resolve_ble_device()
-    assert device is fresh2
-    assert len(resolves) == 2
-    assert client._ble_device is fresh2
 
 
 async def test_mock_mode_stays_off_ble(monkeypatch) -> None:

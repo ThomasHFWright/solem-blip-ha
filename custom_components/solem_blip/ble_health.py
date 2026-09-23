@@ -19,10 +19,9 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 _RECOVERY_HINT = (
-    "The link usually recovers on the next poll. If the problem persists, "
-    "check the controller's battery and radio range; rebooting a Bluetooth "
-    "proxy, or restarting Home Assistant (which reloads the Bluetooth "
-    "adapter), typically resolves it."
+    "Automatic cleanup and connection retries remain enabled. "
+    "If failures persist, check the controller's battery, radio range "
+    "and Bluetooth proxy availability."
 )
 
 

@@ -284,15 +284,101 @@ async def test_repeated_cancellation_waits_for_disconnect_and_serializes(wire):
     assert acquired.is_set() and not radio.is_connected
 
 
-async def test_failed_disconnect_blocks_further_controller_operations(wire):
+@pytest.mark.parametrize('recover_by', ['disconnect', 'remote_drop'])
+async def test_failed_disconnect_recovers_without_reloading(wire, recover_by):
     api,_,_=wire
     radio=Radio({})
     radio.disconnect=AsyncMock(side_effect=BleakError('disconnect failed'))
     api._connect=AsyncMock(return_value=radio)
     await api._run_operation(AsyncMock())
     assert radio.disconnect.await_count==2
-    with pytest.raises(RuntimeError,match='cleanup failed'):
-        await api.set_time()
+    assert api.cleanup_pending
+    second = StatelessSolemClient(api.mac_address)
+    second._connect = AsyncMock(return_value=Radio({}))
+    with pytest.raises(SolemConnectionError, match='cleanup still pending'):
+        await second._run_operation(AsyncMock())
+    second._connect.assert_not_awaited()
+    if recover_by == 'remote_drop':
+        radio.is_connected = False
+    else:
+        radio.disconnect = lambda: Radio.disconnect(radio)
+    await second._run_operation(AsyncMock())
+    second._connect.assert_awaited_once()
+    assert not api.cleanup_pending and not radio.is_connected
+
+
+async def test_timed_out_disconnect_cannot_overlap_new_connection(wire, monkeypatch):
+    api, _, _ = wire
+    radio = Radio({})
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+    async def slow_disconnect():
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+        radio.is_connected = False
+    radio.disconnect = AsyncMock(side_effect=slow_disconnect)
+    api._connect = AsyncMock(return_value=radio)
+    monkeypatch.setattr(module, 'DISCONNECT_CLEANUP_TIMEOUT', .01)
+    await api._run_operation(AsyncMock())
+    await cancelled.wait()
+    try:
+        assert api.cleanup_pending
+        with pytest.raises(SolemConnectionError, match='cleanup still pending'):
+            await api._run_operation(AsyncMock())
+        assert api._connect.await_count == 1
+        assert radio.disconnect.await_count == 1
+    finally:
+        release.set()
+        await asyncio.gather(*api._cleanup_tasks)
+    api._connect.return_value = Radio({})
+    await api._run_operation(AsyncMock())
+    assert api._connect.await_count == 2
+    assert not api.cleanup_pending
+
+
+async def test_unfinished_operation_blocks_reconnect_until_it_exits(wire):
+    api, _, radios = wire
+    release = asyncio.Event()
+    async def operation(_client):
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+    with pytest.raises(UncertainWrite):
+        await api._run_operation(operation, deadline=.01, retry_safe=False)
+    try:
+        assert not radios[0].is_connected and api.cleanup_pending
+        with pytest.raises(SolemConnectionError, match='cleanup still pending'):
+            await api._run_operation(AsyncMock())
+        assert len(radios) == 1
+    finally:
+        release.set()
+        await asyncio.gather(*api._cleanup_tasks)
+    await api._run_operation(AsyncMock())
+    assert len(radios) == 2 and not api.cleanup_pending
+
+
+async def test_replacing_client_cannot_discard_unclosed_session():
+    import gc
+    address = 'AA:BB:CC:DD:EE:99'
+    radio = Radio({})
+    radio.disconnect = AsyncMock(side_effect=BleakError('busy'))
+    api = StatelessSolemClient(address)
+    api._connect = AsyncMock(return_value=radio)
+    await api._run_operation(AsyncMock())
+    del api
+    gc.collect()
+    replacement = StatelessSolemClient(address)
+    replacement._connect = AsyncMock(return_value=Radio({}))
+    with pytest.raises(SolemConnectionError, match='cleanup still pending'):
+        await replacement._run_operation(AsyncMock())
+    replacement._connect.assert_not_awaited()
+    radio.is_connected = False
+    await replacement._run_operation(AsyncMock())
+    assert not replacement.cleanup_pending
 
 
 async def test_cancel_during_connection_releases_partially_connected_client(monkeypatch):
@@ -323,6 +409,11 @@ async def test_resolver_paths_and_cached_callback(monkeypatch):
     found=BLEDevice('AA:BB:CC:DD:EE:07','Test',{})
     api=StatelessSolemClient(found.address,ble_device_resolver=lambda:found)
     assert api._ble_device_callback() is found
+    assert await api._resolve_ble_device() is found
+    newer = BLEDevice(found.address, 'Test', {'source': 'replacement-proxy'})
+    api._ble_device_resolver = lambda: newer
+    assert await api._resolve_ble_device() is newer
+    api._ble_device_resolver = lambda: found
     assert await api._resolve_ble_device() is found
     api._ble_device_resolver=None
     assert api._ble_device_callback() is found

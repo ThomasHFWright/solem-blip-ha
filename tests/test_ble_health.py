@@ -38,7 +38,7 @@ async def test_first_degraded_cycle_logs_warning_with_guidance(
     warnings = _warnings(caplog)
     assert len(warnings) == 1
     assert "BLE cycle degraded (status poll failed)" in warnings[0]
-    assert "usually recovers" in warnings[0]
+    assert "Automatic cleanup" in warnings[0]
 
 
 async def test_consecutive_degraded_cycles_stay_at_one_warning_each(
@@ -53,9 +53,9 @@ async def test_consecutive_degraded_cycles_stay_at_one_warning_each(
     assert coordinator._ble_cycle_degraded_streak == 3
     warnings = _warnings(caplog)
     assert len(warnings) == 3
-    assert "usually recovers" in warnings[0]
-    assert "usually recovers" not in warnings[1]
-    assert "usually recovers" not in warnings[2]
+    assert "Automatic cleanup" in warnings[0]
+    assert "Automatic cleanup" not in warnings[1]
+    assert "Automatic cleanup" not in warnings[2]
     assert "3 consecutive degraded cycles" in warnings[2]
 
 
@@ -137,10 +137,9 @@ async def test_metadata_failures_emit_one_warning_and_debug_detail(
     assert warnings == [
         "AA:BB:CC:DD:EE:FF - BLE cycle degraded "
         "(firmware read and station names read). "
-        "The link usually recovers on the next poll. If the problem "
-        "persists, check the controller's battery and radio range; "
-        "rebooting a Bluetooth proxy, or restarting Home Assistant (which "
-        "reloads the Bluetooth adapter), typically resolves it."
+        "Automatic cleanup and connection retries remain enabled. "
+        "If failures persist, check the controller's battery, radio range "
+        "and Bluetooth proxy availability."
     ]
     assert ble_coordinator._ble_cycle_degraded_streak == 1
     debug_details = [
@@ -176,7 +175,7 @@ async def test_status_failure_emits_one_warning(
 
     warnings = _warnings(caplog)
     assert len(warnings) == 1
-    assert "BLE cycle degraded (status poll failed)" in warnings[0]
+    assert "BLE cycle degraded (status poll failed: TimeoutError)" in warnings[0]
     assert ble_coordinator._ble_cycle_degraded_streak == 1
 
 

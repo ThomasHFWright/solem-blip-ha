@@ -216,10 +216,9 @@ class TestEntitySetupMetadata:
             assert caplog.messages[-1] == (
                 "AA:BB:CC:DD:EE:FF - BLE cycle degraded "
                 "(firmware read and station names read). "
-                "The link usually recovers on the next poll. If the problem "
-                "persists, check the controller's battery and radio range; "
-                "rebooting a Bluetooth proxy, or restarting Home Assistant "
-                "(which reloads the Bluetooth adapter), typically resolves it."
+                "Automatic cleanup and connection retries remain enabled. "
+                "If failures persist, check the controller's battery, radio range "
+                "and Bluetooth proxy availability."
             )
             assert all(
                 record.levelno == logging.DEBUG
