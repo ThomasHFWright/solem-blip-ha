@@ -2,7 +2,7 @@
 
 Reads use bounded retries. Mutations are sent once and their outcome checked.
 One controller lock covers transactions and cancellation cleanup. A connection
-whose release cannot be confirmed blocks further use until reviewed/reloaded.
+whose release cannot be confirmed is retained for cleanup on the next operation.
 """
 
 from __future__ import annotations
@@ -118,9 +118,10 @@ class StatelessSolemClient:
     # -- device resolution -------------------------------------------------
 
     async def _resolve_ble_device(self) -> BLEDevice:
-        """Resolve a fresh BLEDevice, honouring the cache TTL."""
+        """Resolve HA routing afresh; only standalone scanning uses the cache TTL."""
         if (
-            self._ble_device is not None
+            self._ble_device_resolver is None
+            and self._ble_device is not None
             and self._ble_device_cached_at is not None
             and time.monotonic() - self._ble_device_cached_at < BLE_DEVICE_CACHE_TTL
         ):
@@ -226,15 +227,12 @@ class StatelessSolemClient:
                 disconnected_callback=self._on_disconnected,
                 **connect_kwargs,
             )
-        except asyncio.CancelledError:
-            await self._cleanup(self._connecting_client, [])
-            raise
         except BleakOutOfConnectionSlotsError as exc:
             raise SolemConnectionError(
                 "Bluetooth adapter/proxy out of connection slots or device busy"
             ) from exc
         except (BleakError, TimeoutError, OSError) as exc:
-            raise SolemConnectionError("Failed connecting to device") from exc
+            raise SolemConnectionError(f"Failed connecting to device: {exc}") from exc
         except Exception as exc:
             raise SolemConnectionError("Unexpected BLE connection error") from exc
         self._link_dropped = False
@@ -300,6 +298,11 @@ class StatelessSolemClient:
         """Hold controller ownership across several short BLE connections."""
         return self._transaction_lock.hold()
 
+    @property
+    def cleanup_pending(self) -> bool:
+        """Whether the controller is waiting for a previous session to close."""
+        return self._transaction_lock.recover is not None
+
     def _retain_cleanup_task(self, task: asyncio.Task[Any]) -> None:
         self._cleanup_tasks.add(task)
         def finished(done: asyncio.Task[Any]) -> None:
@@ -308,41 +311,46 @@ class StatelessSolemClient:
                 done.exception()
         task.add_done_callback(finished)
 
-    async def _disconnect_quietly(self, client: BleakClient) -> None:
+    async def _disconnect_quietly(self, client: BleakClient) -> bool:
         for _ in range(2):
             task = asyncio.create_task(client.disconnect())
             self._retain_cleanup_task(task)
-            done, _ = await asyncio.wait({task}, timeout=3.0)
+            done, _ = await asyncio.wait({task}, timeout=DISCONNECT_CLEANUP_TIMEOUT)
             if not done:
                 task.cancel()
-                self._transaction_lock.quarantined = True
-                break
+                return False
             try:
                 task.result()
-                if not client.is_connected:
-                    return
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 _LOGGER.debug("BLE disconnect attempt failed", exc_info=True)
-        self._transaction_lock.quarantined = True
-        _LOGGER.error("BLE disconnect could not be confirmed; further operations blocked")
+            if not client.is_connected:
+                return True
+        return False
+
+    async def _recover_cleanup(self, client: BleakClient | None) -> bool:
+        # Never race a lingering write or disconnect with a new connection.
+        if any(not task.done() for task in self._cleanup_tasks):
+            return False
+        recovered = await self._cleanup(client, [])
+        if recovered:
+            _LOGGER.info("Bluetooth cleanup completed; automatic connections resumed")
+        return recovered
 
     async def _cleanup(
         self, client: BleakClient | None, tasks: list[asyncio.Task[Any]]
-    ) -> None:
+    ) -> bool:
         """Bound cancellation cleanup and block reuse if tasks or links remain."""
-        async def finish() -> None:
+        async def finish() -> bool:
             for task in tasks:
                 task.cancel()
                 self._retain_cleanup_task(task)
             pending: set[asyncio.Task[Any]] = set()
             if tasks:
                 _, pending = await asyncio.wait(tasks, timeout=2.0)
-            if client is not None:
-                await self._disconnect_quietly(client)
+            released = client is None or await self._disconnect_quietly(client)
             if pending:
                 _, pending = await asyncio.wait(pending, timeout=2.0)
-                if pending:
-                    self._transaction_lock.quarantined = True
+            return released and not pending
 
         cleanup = asyncio.create_task(finish())
         cancelled = False
@@ -351,9 +359,14 @@ class StatelessSolemClient:
                 await asyncio.shield(cleanup)
             except asyncio.CancelledError:
                 cancelled = True
-        cleanup.result()
+        released = cleanup.result()
+        if not released:
+            # The controller-wide lock retains this client even across reloads.
+            self._transaction_lock.defer_cleanup(lambda: self._recover_cleanup(client))
+            _LOGGER.debug("Bluetooth cleanup pending; the next operation will retry cleanup")
         if cancelled:
             raise asyncio.CancelledError
+        return released
 
     async def _run_operation(
         self, operation: Callable[[BleakClient], Awaitable[_T]], *,
@@ -386,8 +399,7 @@ class StatelessSolemClient:
 
         max_attempts = REQUEST_MAX_ATTEMPTS if retry_safe else 1
         for attempt in range(1, max_attempts + 1):
-            if self._transaction_lock.quarantined:
-                raise SolemConnectionError("Previous Bluetooth cleanup failed; connection reuse blocked")
+            await self._transaction_lock.check_cleanup()
             remaining = deadline_at - time.monotonic()
             if remaining <= 0:
                 raise SolemDeadlineExceeded(
@@ -462,7 +474,7 @@ class StatelessSolemClient:
         if not retry_safe:
             raise UncertainWrite("Command outcome uncertain; refresh status before retrying") from last_error
         raise SolemDeadlineExceeded(
-            f"Operation deadline exceeded after {max_attempts} attempt(s)"
+            f"Operation deadline exceeded after {max_attempts} attempt(s): {last_error}"
         ) from last_error
 
     # -- shared operation helpers ------------------------------------------

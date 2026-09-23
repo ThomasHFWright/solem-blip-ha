@@ -48,6 +48,7 @@ async def async_get_config_entry_diagnostics(
         "config_entry": async_redact_data(dict(config_entry.data), _TO_REDACT),
         "available": coordinator.last_update_success,
         "last_update_success": coordinator.last_update_success,
+        "bluetooth_cleanup_pending": coordinator.api.cleanup_pending,
         "last_poll_age_seconds": last_poll_age,
         "last_time_sync": coordinator._last_set_time_sync,
         "firmware_version": coordinator.firmware_version,

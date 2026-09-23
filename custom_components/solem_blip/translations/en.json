@@ -262,7 +262,7 @@
   "issues": {
     "bluetooth_unavailable": {
       "title": "Bluetooth connection unavailable",
-      "description": "Home Assistant could not reliably poll controller {mac} over Bluetooth. Check that the controller is powered on, in range, and not connected to another app. If it connects through a Bluetooth proxy, rebooting the proxy typically resolves it; otherwise restarting Home Assistant reloads the Bluetooth adapter."
+      "description": "Home Assistant could not reliably poll controller {mac} over Bluetooth. Automatic cleanup and reconnection remain enabled. Check that the controller is powered on, in range, and not connected to another app, and that its Bluetooth proxy is available and scanning."
     }
   },
   "selector": {
