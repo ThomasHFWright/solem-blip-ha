@@ -1032,16 +1032,59 @@ class StatelessSolemClient:
             raise
 
     async def set_time(self, when: datetime | None = None) -> None:
-        """Push local date/time to the device RTC (write-only, no commit)."""
+        """Set local time once; wait for its reply and verify the clock alarm clears."""
         if self.mock:
             return
 
-        payload = protocol.pack_set_time(when)
-
         async def _op(client: BleakClient) -> None:
-            await self._write(client, payload)
+            received = asyncio.Event()
+            status: dict[str, Any] = {}
+            reply: bytes | None = None
+            phase = "status"
 
-        await self._run_operation(_op, retry_safe=False)
+            def notification_handler(_sender: int, data: bytearray) -> None:
+                nonlocal reply
+                if phase == "time":
+                    if len(data) >= 2 and data[0] == 0x04:
+                        reply = bytes(data)
+                        received.set()
+                elif data[:2] in (b"\x32\x10", b"\x3c\x10"):
+                    parsed = protocol.parse_status_notification(data, max_station_num=self.max_station_num)
+                    if parsed is not None:
+                        status.update(parsed)
+                        received.set()
+
+            async def read_status() -> None:
+                received.clear()
+                status.clear()
+                await self._write(client, COMMIT_COMMAND)
+                await self._wait_for_event(received, STATUS_NOTIFY_TIMEOUT, "clock status")
+
+            await self._start_notify(client, notification_handler)
+            try:
+                await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+                await read_status()
+                if status["is_watering"] or status.get("active_program") is not None:
+                    raise SolemConnectionError("Clock update deferred while watering")
+                phase = "time"
+                received.clear()
+                await self._write(client, protocol.pack_set_time(when))
+                await self._wait_for_event(received, STATUS_NOTIFY_TIMEOUT, "time-setting reply")
+                assert reply is not None
+                if len(reply) >= 3 and (reply[2] == 0xF0 or (len(reply) > 3 and reply[3] == 0xF0)):
+                    raise SolemConnectionError(f"Controller rejected time update ({reply[:4].hex()})")
+                phase = "status"
+                # 3b00 here is a read-only status request, not a time-command commit.
+                await read_status()
+                if status["time_alarm"]:
+                    raise SolemConnectionError(f"Clock alarm remains set after time update ({reply[:4].hex()})")
+            finally:
+                await self._stop_notify(client)
+
+        try:
+            await self._run_operation(_op, retry_safe=False)
+        except UncertainWrite as err:
+            raise UncertainWrite(f"Clock sync not verified: {err.__cause__ or err}") from err
 
     async def _execute_command(
         self,

@@ -177,8 +177,10 @@ async def test_manual_commands_acknowledge_seq2_without_final_seq0(wire):
         assert radios[-1].writes[-1]==b'\x3b\x00'
     status=await api.get_status(include_raw=True)
     assert status['raw_notification_hex'].startswith('321002')
+    time_frame = protocol.pack_set_time(datetime(2026,6,1,12))
+    responses[time_frame] = [b'\x04\x00']
     await api.set_time(datetime(2026,6,1,12))
-    assert radios[-1].writes==[protocol.pack_set_time(datetime(2026,6,1,12))]
+    assert radios[-1].writes == [protocol.pack_commit(), time_frame, protocol.pack_commit()]
     mock=StatelessSolemClient('AA:BB:CC:DD:EE:05',mock=True)
     for name,args in methods: await getattr(mock,name)(*args)
     await mock.set_time()
@@ -194,6 +196,42 @@ async def test_mutation_timeout_never_replayed(wire,monkeypatch):
     with pytest.raises(UncertainWrite): await api.turn_on()
     assert len(radios)==1
     assert radios[0].writes==[protocol.pack_turn_on(),protocol.pack_commit()]
+
+
+@pytest.mark.parametrize('outcome', ['cleared', 'alarm', 'rejected', 'missing', 'watering', 'pause'])
+async def test_clock_sync_requires_reply_and_clear_alarm(wire, outcome):
+    api, responses, radios = wire
+    moment = datetime(2026, 6, 1, 12)
+    frame = protocol.pack_set_time(moment)
+    before = bytearray(18)
+    before[:4] = bytes.fromhex('32100260')  # ON, clock alarm set
+    if outcome == 'watering':
+        before[3] |= 2
+        before[9] = 1
+    if outcome == 'pause':
+        before[8] = 1
+    after = before.copy()
+    if outcome == 'cleared':
+        after[3] &= ~0x20
+    replies = iter([[b'invalid', before], [after]])
+    responses[protocol.pack_commit()] = lambda: next(replies)
+    responses[frame] = {
+        'missing': [b'\x04', b'\x02\x00'],
+        'rejected': [b'\x04\x02\xf0\x14'],
+    }.get(outcome, [b'\x04\x00'])
+    if outcome == 'cleared':
+        await api.set_time(moment)
+    else:
+        with pytest.raises(UncertainWrite):
+            await api.set_time(moment)
+    assert len(radios) == 1
+    assert radios[0].disconnects == 1 and not radios[0].is_connected
+    expected = [protocol.pack_commit()]
+    if outcome not in ('watering', 'pause'):
+        expected.append(frame)
+    if outcome in ('cleared', 'alarm'):
+        expected.append(protocol.pack_commit())
+    assert radios[0].writes == expected
 
 
 async def test_notify_failures_retry_subscription_and_disconnect(wire):
@@ -251,7 +289,7 @@ async def test_failed_disconnect_blocks_further_controller_operations(wire):
     radio=Radio({})
     radio.disconnect=AsyncMock(side_effect=BleakError('disconnect failed'))
     api._connect=AsyncMock(return_value=radio)
-    await api.set_time()
+    await api._run_operation(AsyncMock())
     assert radio.disconnect.await_count==2
     with pytest.raises(RuntimeError,match='cleanup failed'):
         await api.set_time()
