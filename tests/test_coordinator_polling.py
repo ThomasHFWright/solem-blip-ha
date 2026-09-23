@@ -348,6 +348,36 @@ async def test_set_time_throttled(
     mock_solem_client.set_time.assert_awaited_once()
 
 
+async def test_clock_alarm_bypasses_throttle_only_when_idle():
+    """Only a verified sync clears the alarm and advances the sync timestamp."""
+    import asyncio
+    from types import SimpleNamespace
+    from custom_components.solem_blip.coordinator_polling import maybe_set_device_time
+
+    last_sync = asyncio.get_running_loop().time()
+    coordinator = SimpleNamespace(
+        solem_api_mock=False, api=SimpleNamespace(mock=False, set_time=AsyncMock()),
+        _irrigation_active=False, _is_watering=False, active_program_num=1,
+        _set_time_pending=False, time_alarm=True, _last_set_time_at=last_sync,
+        _last_set_time_sync=None, controller_mac_address='test',
+    )
+    await maybe_set_device_time(coordinator)
+    coordinator.api.set_time.assert_not_awaited()
+    coordinator.active_program_num = None
+    coordinator.api.set_time.side_effect = TimeoutError('no verified reply')
+    await maybe_set_device_time(coordinator)
+    assert coordinator.time_alarm is True
+    assert coordinator._last_set_time_at == last_sync
+    assert coordinator._last_set_time_sync is None
+    coordinator.api.set_time.side_effect = None
+    await maybe_set_device_time(coordinator)
+    assert coordinator.api.set_time.await_count == 2
+    assert coordinator.time_alarm is False
+    assert coordinator._last_set_time_sync is not None
+    await maybe_set_device_time(coordinator)
+    assert coordinator.api.set_time.await_count == 2
+
+
 @pytest.mark.asyncio
 async def test_set_time_retriggers_after_cycle_recovery(
     hass: HomeAssistant,

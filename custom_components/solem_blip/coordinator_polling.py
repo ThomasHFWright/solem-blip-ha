@@ -124,12 +124,17 @@ async def maybe_set_device_time(coordinator: SolemCoordinator) -> None:
     """Push HA local time to the device when throttling allows."""
     if coordinator.solem_api_mock or coordinator.api.mock:
         return
-    if coordinator._irrigation_active or coordinator._is_watering:
+    if (
+        coordinator._irrigation_active
+        or coordinator._is_watering
+        or coordinator.active_program_num is not None
+    ):
         return
 
     now = asyncio.get_running_loop().time()
     if (
         not coordinator._set_time_pending
+        and not coordinator.time_alarm
         and coordinator._last_set_time_at
         and now - coordinator._last_set_time_at < SET_TIME_MIN_INTERVAL
     ):
@@ -146,6 +151,7 @@ async def maybe_set_device_time(coordinator: SolemCoordinator) -> None:
         )
         return
 
+    coordinator.time_alarm = False
     coordinator._set_time_pending = False
     coordinator._last_set_time_at = now
     coordinator._last_set_time_sync = moment
