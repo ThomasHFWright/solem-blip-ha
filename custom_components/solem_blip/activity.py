@@ -24,6 +24,7 @@ SCHEDULE_SOURCE = "Scheduled"
 BLUETOOTH_SOURCE = "Manual Bluetooth"
 UNKNOWN_SOURCE = "Unknown"
 HISTORY_LIMIT = 30
+START_GAP_LIMIT_SECONDS = 600
 
 
 class WateringActivity:
@@ -40,6 +41,7 @@ class WateringActivity:
         self.pending: dict[str, Any] | None = None
         self.last_seen: datetime | None = None
         self.last_revision: str | None = None
+        self.last_active = False
 
     @property
     def state(self) -> dict[str, Any]:
@@ -111,11 +113,11 @@ class WateringActivity:
             if intent["confirmed"]:
                 return HA_SOURCE
             return UNKNOWN_SOURCE
-        if not continuous:
+        if self.last_seen is None:
             return UNKNOWN_SOURCE
         program_num = status.get("active_program")
         if not program_num:
-            if status.get("watering_origin") == "manual":
+            if continuous and status.get("watering_origin") == "manual":
                 return BLUETOOTH_SOURCE
             return UNKNOWN_SOURCE
         program = self.c.irrigation_programs.get(program_num - 1)
@@ -125,6 +127,33 @@ class WateringActivity:
             or read_at is None or not 0 <= (now - read_at).total_seconds() <= 7200):
             return UNKNOWN_SOURCE
         assert self.last_seen is not None
+        if not continuous:
+            # Only bridge a brief idle-to-running gap. A restart or an already
+            # running program cannot establish a new scheduled start.
+            if (self.last_active or not 0 <= (now - self.last_seen).total_seconds() <= START_GAP_LIMIT_SECONDS
+                or read_at > self.last_seen or program["inter_station_delay"]):
+                return UNKNOWN_SOURCE
+            durations = program["station_durations"]
+            first = next((i for i, seconds in enumerate(durations, 1) if seconds > 0), None)
+            remaining = status.get("remaining_seconds")
+            if (first is None or status.get("station_num") != first or not status.get("is_watering")
+                or not isinstance(remaining, int) or remaining <= 0):
+                return UNKNOWN_SOURCE
+            duration = durations[first - 1] * program["water_budget"] / 100
+            if duration <= 0 or remaining > duration:
+                return UNKNOWN_SOURCE
+            # V5 observations include whole-minute truncation of budgeted runs.
+            # Bound that uncertainty rather than assuming exact second scaling.
+            # ponytail: first active station only; later stations need validated
+            # cumulative rounding and inter-station timing before back-calculation.
+            earliest = max(self.last_seen, now - timedelta(seconds=duration - remaining + 30))
+            latest = now - timedelta(seconds=max(0, duration // 60 * 60 - remaining) - 30)
+            candidate = next_start_datetime(program, dt_util.as_local(earliest))
+            if candidate and candidate <= dt_util.as_local(latest):
+                following = next_start_datetime(program, candidate)
+                if following is None or following > dt_util.as_local(latest):
+                    return SCHEDULE_SOURCE
+            return UNKNOWN_SOURCE
         # Compare start slots in HA's local timezone across the observed transition.
         # A small clock tolerance is included; matching is evidence, not proof.
         candidate = next_start_datetime(program, dt_util.as_local(self.last_seen - timedelta(seconds=30)))
@@ -137,6 +166,7 @@ class WateringActivity:
         now = dt_util.utcnow()
         continuous = self.last_seen is not None and 0 <= (now - self.last_seen).total_seconds() <= max(60, self.c.poll_interval * 2 + 30)
         active = bool(status.get("is_watering") or status.get("active_program"))
+        unobserved_command = not continuous and self.pending is not None
         intent = None
         if self.pending:
             at = dt_util.parse_datetime(self.pending["at"])
@@ -154,7 +184,7 @@ class WateringActivity:
         if active and self.current is None:
             source = self._classify(status, now, continuous, intent)
             # An unmatched recent HA attempt could have affected this run too.
-            if self.pending:
+            if self.pending or (unobserved_command and intent is None):
                 source = UNKNOWN_SOURCE
             self.current = {
                 "source": source,
@@ -177,3 +207,4 @@ class WateringActivity:
                 self._save()
         self.last_seen = now
         self.last_revision = self.c.program_manager.revision
+        self.last_active = active

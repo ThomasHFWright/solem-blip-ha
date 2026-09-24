@@ -208,3 +208,60 @@ async def test_idle_after_ha_attempt_cannot_claim_a_later_external_start(activit
     activity.c.irrigation_programs[0]['start_times'] = [180]+[None]*7
     activity.observe(RUN)
     assert activity.current['source'] == 'Manual Bluetooth'
+
+
+@pytest.mark.parametrize('cause', [None, 'wrong_time', 'later_station', 'missing_remaining',
+                                  'invalid_remaining', 'long_gap', 'already_running',
+                                  'changed_revision', 'clock_alarm', 'new_read', 'delay',
+                                  'uncertain_command', 'multiple_starts', 'restart'])
+async def test_scheduled_start_after_missed_poll(activity, freezer, cause):
+    """First-zone countdown recovers attribution without assuming every gap is scheduled."""
+    freezer.move_to('2026-09-24T02:59:00+00:00')
+    start = dt_util.now() + timedelta(minutes=1)
+    program = activity.c.irrigation_programs[0]
+    program.update(start_times=[start.hour * 60 + start.minute] + [None]*7,
+                   station_durations=[600, 600, 600, 900, 600, 900],
+                   water_budget=88, inter_station_delay=0)
+    activity.c.program_manager.last_read = dt_util.utcnow().isoformat()
+    activity.observe(RUN if cause == 'already_running' else IDLE)
+    if cause == 'uncertain_command':
+        with pytest.raises(RuntimeError):
+            async with activity.command(program=1):
+                raise RuntimeError('reply lost')
+    freezer.move_to('2026-09-24T03:04:23+00:00')
+    status = {**RUN, 'remaining_seconds': 224}
+    if cause == 'wrong_time': status['remaining_seconds'] = 480
+    if cause == 'later_station': status['station_num'] = 2
+    if cause == 'missing_remaining': status.pop('remaining_seconds')
+    if cause == 'invalid_remaining': status['remaining_seconds'] = 900
+    if cause == 'long_gap': activity.last_seen -= timedelta(minutes=10)
+    if cause == 'changed_revision': activity.last_revision = 'old'
+    if cause == 'clock_alarm': status['time_alarm'] = True
+    if cause == 'new_read': activity.c.program_manager.last_read = dt_util.utcnow().isoformat()
+    if cause == 'delay': program['inter_station_delay'] = 60
+    if cause == 'multiple_starts':
+        program['start_times'][1] = program['start_times'][0] + 1
+        status['remaining_seconds'] = 260
+    if cause == 'restart': activity.last_seen = None
+    activity.observe(status)
+    assert activity.current['source'] == ('Scheduled' if cause is None else 'Unknown')
+    assert activity.current['first_detected'] == dt_util.utcnow().isoformat()
+    activity.c.api.run_program_x.assert_not_awaited()
+
+
+async def test_gap_matching_skips_disabled_zones_and_uses_local_midnight(activity, freezer):
+    old_zone = dt_util.DEFAULT_TIME_ZONE
+    dt_util.set_default_time_zone(dt_util.get_time_zone('Europe/Lisbon'))
+    try:
+        freezer.move_to('2026-09-18T22:59:00+00:00')
+        activity.c.program_manager.last_read = dt_util.utcnow().isoformat()
+        program = activity.c.irrigation_programs[0]
+        program.update(start_times=[0]+[None]*7, week_days=1 << 5,
+                       station_durations=[0, 600, 0, 0, 0, 0], water_budget=100,
+                       inter_station_delay=0)
+        activity.observe(IDLE)
+        freezer.tick(timedelta(minutes=6))
+        activity.observe({**RUN, 'station_num': 2, 'remaining_seconds': 300})
+        assert activity.current['source'] == 'Scheduled'
+    finally:
+        dt_util.set_default_time_zone(old_zone)
