@@ -2429,7 +2429,7 @@ wheels = [
 
 [[package]]
 name = "solem-blip-ha"
-version = "1.4.0b20"
+version = "1.4.0b21"
 source = { editable = "." }
 dependencies = [
     { name = "bleak" },
