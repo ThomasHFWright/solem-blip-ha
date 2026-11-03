@@ -42,7 +42,7 @@ DEGRADED_CYCLE_STUCK_THRESHOLD = 10
 # Cleanup-exhausted warnings are keyed by logger name prefix instead of the
 # exact module path so a library-side rename of the emitting module keeps the
 # signature working.
-_CLEANUP_EXHAUSTED_LOGGERS = ("solem_blip_ble.",)
+_CLEANUP_EXHAUSTED_LOGGERS = ("custom_components.solem_blip.ble.",)
 
 
 def _is_cleanup_exhausted_record(record: logging.LogRecord) -> bool:

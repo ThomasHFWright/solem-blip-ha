@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from solem_blip_ble import IrrigationProgram
+from custom_components.solem_blip.ble import IrrigationProgram
 
 from custom_components.solem_blip import coordinator as coordinator_module
 from custom_components.solem_blip.coordinator import SolemCoordinator

@@ -19,7 +19,7 @@ from custom_components.solem_blip.stuck_recovery import (
     detach_stuck_adapter_detector,
 )
 
-STUCK_LOGGER = "solem_blip_ble.client_persistent"
+STUCK_LOGGER = "custom_components.solem_blip.ble.client_persistent"
 STUCK_RECOVERY_LOGGER = "custom_components.solem_blip.stuck_recovery"
 
 

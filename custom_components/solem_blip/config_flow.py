@@ -23,9 +23,9 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import TimeSelector, selector
 from homeassistant.util import dt as dt_util
 
-from solem_blip_ble import IrrigationProgram, SolemConnectionError
-from solem_blip_ble.exceptions import InvalidSnapshot
-from solem_blip_ble.protocol import period_start_to_synchro
+from .ble import IrrigationProgram, SolemConnectionError
+from .ble.exceptions import InvalidSnapshot
+from .ble.protocol import period_start_to_synchro
 
 from .bluetooth import (
     async_get_connectable_device,
@@ -65,6 +65,7 @@ from .schedule import (
     schedule_summary,
 )
 from .station_names import StationNameManager
+from .rainfall import RAIN_OPTIONS, program_fingerprint
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ class _StartSlotSelector(TimeSelector):
 MENU_SETTINGS = "settings"
 MENU_EDIT_PROGRAM = "program_select"
 MENU_EDIT_STATION_NAMES = "station_select"
+MENU_RAINFALL = "rainfall"
 
 ATTR_ACCEPT_CURRENT = "accept_current"
 ATTR_STATION = "station"
@@ -523,6 +525,7 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
     """Handle integration options."""
 
     _selected_program_index: int = 0
+    _program_revision: str | None = None
     # Pending state for the preview-only confirm steps (issue #129): the
     # program parsed from the last submit, kept until the user confirms
     # (writes) or declines (fresh editor). Cleared on a fresh editor render.
@@ -551,7 +554,113 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
                 MENU_SETTINGS,
                 MENU_EDIT_PROGRAM,
                 MENU_EDIT_STATION_NAMES,
+                MENU_RAINFALL,
             ],
+        )
+
+    async def async_step_rainfall(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure guarded rainfall discounts from fresh onboard programs."""
+        current = self.config_entry.options.get(RAIN_OPTIONS, {})
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                coordinator = self._coordinator
+                if coordinator is None:
+                    raise ValueError("Integration is not loaded")
+                selected = user_input["programs"]
+                baselines = {
+                    key: int(user_input[f"baseline_{key}"]) for key in selected
+                }
+                fingerprints: dict[str, str] = {}
+                if selected:
+                    await coordinator.refresh_irrigation_programs()
+                    if coordinator.program_backup.pending:
+                        raise ValueError("Resolve the uncertain restore first")
+                    for key in selected:
+                        program = coordinator.irrigation_programs[int(key)]
+                        confirmed_discount = (
+                            baselines[key]
+                            == current.get("baselines", {}).get(key)
+                            and program["water_budget"]
+                            == coordinator.rainfall.state.get(
+                                "expected_budgets", {}
+                            ).get(key)
+                        )
+                        if (
+                            program["water_budget"] != baselines[key]
+                            and not confirmed_discount
+                        ):
+                            raise ValueError(
+                                "Normal budget must match current device settings"
+                            )
+                        fingerprints[key] = program_fingerprint(dict(program))
+                rainfall = {
+                    **user_input,
+                    "baselines": baselines,
+                    "fingerprints": fingerprints,
+                }
+                return self.async_create_entry(
+                    title="",
+                    data={**self.config_entry.options, RAIN_OPTIONS: rainfall},
+                )
+            except Exception:
+                errors["base"] = "rainfall_baseline"
+
+        fields: dict[Any, Any] = {
+            vol.Required("sensor", default=current.get("sensor", "")): selector(
+                {"entity": {"domain": "sensor"}}
+            ),
+            vol.Required(
+                "target_mm", default=current.get("target_mm", 4)
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000)),
+            vol.Required(
+                "max_age_minutes", default=current.get("max_age_minutes", 60)
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
+            vol.Required("programs", default=current.get("programs", [])): selector(
+                {
+                    "select": {
+                        "multiple": True,
+                        "options": [
+                            {"value": str(index), "label": f"Program {label}"}
+                            for index, label in enumerate(PROGRAM_LABELS)
+                        ],
+                    }
+                }
+            ),
+            vol.Required(
+                "automatic", default=current.get("automatic", False)
+            ): bool,
+            vol.Required(
+                "timing", default=current.get("timing", "hourly")
+            ): selector(
+                {
+                    "select": {
+                        "options": [
+                            {"value": "hourly", "label": "Hourly"},
+                            {
+                                "value": "before_program",
+                                "label": "15 minutes before each program's first start",
+                            },
+                        ]
+                    }
+                }
+            ),
+            vol.Required(
+                "whole_controller_delay",
+                default=current.get("whole_controller_delay", False),
+            ): bool,
+        }
+        for index in range(3):
+            fields[
+                vol.Required(
+                    f"baseline_{index}",
+                    default=current.get("baselines", {}).get(str(index), 100),
+                )
+            ] = vol.All(vol.Coerce(int), vol.Range(min=1, max=65535))
+        return self.async_show_form(
+            step_id="rainfall", data_schema=vol.Schema(fields), errors=errors
         )
 
     async def async_step_settings(
@@ -619,6 +728,25 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
     ) -> ConfigFlowResult:
         """Choose which on-device program to edit."""
         if user_input is not None:
+            coordinator = self._coordinator
+            if coordinator is None:
+                return self.async_show_form(
+                    step_id="program_select",
+                    data_schema=vol.Schema({}),
+                    errors={"base": "not_loaded"},
+                )
+            try:
+                await coordinator.refresh_irrigation_programs()
+                snapshot = coordinator.api.last_snapshot
+                if snapshot is None:
+                    raise InvalidSnapshot("No complete program snapshot available")
+            except Exception:
+                return self.async_show_form(
+                    step_id="program_select",
+                    data_schema=vol.Schema({}),
+                    errors={"base": "set_program_failed"},
+                )
+            self._program_revision = snapshot.revision
             self._selected_program_index = int(user_input[ATTR_PROGRAM]) - 1
             return await self.async_step_program_edit()
 
@@ -935,7 +1063,11 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
         assert coordinator is not None  # caller guarantees a loaded entry
         errors: dict[str, str] = {}
         try:
-            await coordinator.set_irrigation_program(program_index, program)
+            await coordinator.set_irrigation_program(
+                program_index,
+                program,
+                expected_revision=self._program_revision,
+            )
         except Exception:
             _LOGGER.exception(
                 "Failed to update Program %s from options flow",
@@ -948,6 +1080,10 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
             self._pending_program = None
             self._pending_program_index = None
             self._pending_warning = ""
+            try:
+                await coordinator.refresh_irrigation_programs()
+            except Exception:
+                pass
         else:
             return self.async_create_entry(
                 title="",

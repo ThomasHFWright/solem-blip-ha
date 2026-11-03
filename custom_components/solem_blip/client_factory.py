@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from solem_blip_ble.client_persistent import PersistentSolemClient
-from solem_blip_ble.client_v2 import StatelessSolemClient
+from .ble.client_persistent import PersistentSolemClient
+from .ble.client_v2 import StatelessSolemClient
 
 from homeassistant.const import CONF_SCAN_INTERVAL
 

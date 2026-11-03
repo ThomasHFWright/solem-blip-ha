@@ -7,7 +7,7 @@ from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
-from solem_blip_ble import IrrigationProgram
+from .ble import IrrigationProgram
 
 from .config_entry import MyConfigEntry
 from .const import CONTROLLER_MAC_ADDRESS, PROGRAM_LABELS
@@ -46,6 +46,9 @@ async def async_get_config_entry_diagnostics(
     return {
         "config_entry": async_redact_data(dict(config_entry.data), _TO_REDACT),
         "available": coordinator.last_update_success,
+        "bluetooth_cleanup_pending": getattr(
+            coordinator.api, "cleanup_pending", False
+        ),
         "last_update_success": coordinator.last_update_success,
         "last_poll_age_seconds": last_poll_age,
         "firmware_version": coordinator.firmware_version,
@@ -83,5 +86,8 @@ async def async_get_config_entry_diagnostics(
             "program_count": len(coordinator.irrigation_programs),
             "retry_after": coordinator._irrigation_config_retry_after,
             "refresh_after": coordinator._irrigation_config_refresh_after,
+            "last_write": coordinator.programs_last_write,
+            "error": coordinator.program_error,
+            "write": dict(coordinator.api.program_write_diagnostics),
         },
     }

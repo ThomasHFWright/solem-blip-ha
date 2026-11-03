@@ -12,12 +12,12 @@ import pytest
 
 from custom_components.solem_blip.config_flow import SolemOptionsFlowHandler
 from custom_components.solem_blip.station_names import StationNameManager
-from solem_blip_ble.exceptions import (
+from custom_components.solem_blip.ble.exceptions import (
     InvalidSnapshot,
     StaleProgram,
     UncertainWrite,
 )
-from solem_blip_ble.station_names import StationNameSnapshot
+from custom_components.solem_blip.ble.station_names import StationNameSnapshot
 
 
 def _snapshot(num: int = 6) -> StationNameSnapshot:

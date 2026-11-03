@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
-from solem_blip_ble.exceptions import (
+from .ble.exceptions import (
     InvalidSnapshot,
     SolemConnectionError,
     StaleProgram,

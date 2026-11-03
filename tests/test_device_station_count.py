@@ -433,8 +433,8 @@ async def test_polling_filter_uses_grown_device_count(
 
 
 @pytest.mark.asyncio
-async def test_pin_is_solem_blip_ble_0_4_0() -> None:
-    """The manifest and pyproject pin solem-blip-ble==0.4.0."""
+async def test_ble_transport_is_bundled() -> None:
+    """The integration ships its BLE transport without a runtime package."""
     import pathlib
 
     import tomllib
@@ -443,8 +443,8 @@ async def test_pin_is_solem_blip_ble_0_4_0() -> None:
     manifest = json.loads(
         (root / "custom_components/solem_blip/manifest.json").read_text()
     )
-    assert "solem-blip-ble==0.4.0" in manifest["requirements"]
+    assert manifest["requirements"] == []
+    assert (root / "custom_components/solem_blip/ble/client_v2.py").is_file()
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
-    deps = pyproject["project"]["dependencies"]
-    assert "solem-blip-ble==0.4.0" in deps
+    assert pyproject["project"]["dependencies"] == []

@@ -29,9 +29,9 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
-from solem_blip_ble import protocol
-from solem_blip_ble.exceptions import InvalidSnapshot, StaleProgram, UncertainWrite
-from solem_blip_ble.station_names import StationNameSnapshot
+from .ble import protocol
+from .ble.exceptions import InvalidSnapshot, StaleProgram, UncertainWrite
+from .ble.station_names import StationNameSnapshot
 
 from .const import DOMAIN
 

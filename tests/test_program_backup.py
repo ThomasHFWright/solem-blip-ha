@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from solem_blip_ble import protocol
-from solem_blip_ble.snapshot import InvalidSnapshot, ProgramSnapshot
+from custom_components.solem_blip.ble import protocol
+from custom_components.solem_blip.ble.snapshot import InvalidSnapshot, ProgramSnapshot
 
 from custom_components.solem_blip.program_backup import (
     ProgramBackupStore,

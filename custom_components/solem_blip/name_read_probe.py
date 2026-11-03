@@ -29,7 +29,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from solem_blip_ble.client_persistent import PersistentSolemClient
+from .ble.client_persistent import PersistentSolemClient
 
 from .client_factory import build_solem_client
 from .bluetooth import async_get_connectable_device

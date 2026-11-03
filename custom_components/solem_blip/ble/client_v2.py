@@ -1,0 +1,1848 @@
+"""Stateless connect-per-operation BLE client for Solem BL-IP controllers.
+
+v2 connection layer (beelzetron/solem-blip-ble#38). Unlike the 0.1.x
+persistent-session client, this module keeps **no session state**: every
+public operation resolves the device, connects, runs the protocol exchange,
+and closes the client — always, including on failure.
+
+Guarantees, by construction rather than by patching:
+
+- **Bounded worst case**: a whole-operation deadline (30 s) wraps every
+  internal retry, so a dead link fails in bounded time.
+- **Active disconnect detection**: the backend disconnect callback
+  short-circuits in-flight waits immediately.
+- **Flat bounded retry**: one small retry loop around the whole operation
+  for transient errors only. No nested retry layers, no tenacity.
+- **No stale state**: nothing survives an operation except parsed data.
+  Stale-client reuse and poisoned-release bugs are impossible by design.
+
+The 0.1.x persistent-session client (``client.py``) was removed in 0.4.0;
+``protocol.py`` is reused unchanged.
+
+Single-connection device behavior: the BL-IP controller stops advertising
+during and for tens of seconds after any connection attempt. Therefore
+each ``establish_connection`` call makes exactly one attempt
+(``max_attempts=1``) — an immediate internal retry is guaranteed to fail
+while the device is not advertising — and operation-level retries are
+spaced by ``REQUEST_RETRY_DELAY`` so the device has time to start
+advertising again.
+
+Connect-phase failure signatures (visible in the ``Attempt N failed:``
+debug log, which previously logged an empty reason for the bare
+``asyncio.TimeoutError`` raised by ``wait_for``):
+
+- ``Connect phase timed out after Ns (device not advertising, out of
+  range, or refusing connections)`` — the whole-operation deadline
+  expired before the connect attempt returned
+  (:class:`_ConnectTimedOut`).
+- ``Failed connecting to device: {exc}`` — the backend connect attempt
+  itself failed (BleakError/TimeoutError/OSError from
+  ``establish_connection``); the underlying error text is included so
+  the ``Attempt N failed:`` log line is self-describing.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Any, TypeVar
+
+from bleak import BleakClient, BleakScanner
+from bleak.backends.device import BLEDevice
+from bleak.exc import BleakError
+from bleak_retry_connector import (
+    BleakClientWithServiceCache,
+    BleakOutOfConnectionSlotsError,
+    establish_connection,
+)
+
+from . import protocol
+from .const import (
+    BLE_DEVICE_CACHE_TTL,
+    COMMIT_COMMAND,
+    DEFAULT_BLUETOOTH_TIMEOUT,
+    IRRIGATION_CONFIG_IDLE_TIMEOUT,
+    MAX_STATION_NUM,
+    NOTIFY_CHAR_UUID,
+    NOTIFY_PARTIAL_RETRY_DELAY,
+    NOTIFY_SETTLE_DELAY,
+    OPERATION_DEADLINE,
+    REQUEST_MAX_ATTEMPTS,
+    REQUEST_RETRY_DELAY,
+    STATION_NAMES_IDLE_TIMEOUT,
+    STATUS_NOTIFY_TIMEOUT,
+    WRITE_CHAR_UUID,
+)
+from .exceptions import (
+    InvalidSnapshot,
+    ProgramWriteRejected,
+    SolemConnectionError,
+    SolemDeadlineExceeded,
+    SolemSilentLink,
+    SolemTimeSyncBusy,
+    SolemTimeSyncRejected,
+    SolemTimeSyncVerificationFailed,
+    StaleProgram,
+    UncertainWrite,
+)
+from .snapshot import ProgramSnapshot
+from .station_names import StationNameSnapshot
+from .locking import controller_lock
+
+_LOGGER = logging.getLogger(__name__)
+
+# Bounded optional wait for the identification name record after the
+# firmware payload has arrived. Name metadata is optional: the firmware
+# read must never fail or stall because the record is absent.
+IDENTIFICATION_NAME_TIMEOUT = 2.0
+
+_T = TypeVar("_T")
+
+DISCONNECT_CLEANUP_TIMEOUT = 3.0
+
+
+@dataclass(frozen=True)
+class SolemRawBleSession:
+    """Connected BL-IP BLE session for raw validation/debug captures."""
+
+    client: BleakClient
+    notify_characteristic: Any
+    write_characteristic: Any
+
+
+def _find_characteristic(client: BleakClient, uuid: str) -> Any:
+    """Resolve a characteristic by UUID, preferring the service cache."""
+    services = client.services
+    get_characteristic = getattr(services, "get_characteristic", None)
+    if callable(get_characteristic):
+        characteristic = get_characteristic(uuid)
+        if characteristic is not None:
+            return characteristic
+
+    for service in services:
+        for characteristic in service.characteristics:
+            if str(characteristic.uuid).lower() == uuid.lower():
+                return characteristic
+
+    raise SolemConnectionError(f"Missing BLE characteristic: {uuid}")
+
+# Backend-level errors. BleakError is the base class of every backend error
+# family (BleakDBusError, BleakGATTProtocolError, bleak-esphome wrappers), so
+# catching the base covers all current and future backend error types.
+_BACKEND_ERRORS = (BleakError, TimeoutError, OSError)
+
+
+class _ConnectTimedOut(asyncio.TimeoutError):
+    """Internal: the whole-operation deadline expired during the connect phase.
+
+    Subclasses ``asyncio.TimeoutError`` so every existing except clause that
+    matches the bare timeout keeps matching, while carrying a human-readable
+    reason — a bare ``asyncio.TimeoutError`` has an empty ``str()`` and made
+    the ``Attempt N failed:`` log line useless for triage.
+
+    Message format: ``Connect phase timed out after Ns (device not
+    advertising, out of range, or refusing connections)``.
+    """
+
+
+class _DropDetected(Exception):
+    """Internal: the link dropped mid-operation; do not retry."""
+
+
+async def _await_operation(awaitable: Awaitable[_T]) -> _T:
+    return await awaitable
+
+
+class _StationNameWriteSession:
+    """Ack-matching state machine for one station-name write session.
+
+    Module level so the write path stays readable and the ack rules are
+    testable in isolation. The handler retains only headers/counts —
+    never user names or payloads.
+    """
+
+    __slots__ = (
+        "acknowledged",
+        "diagnostic",
+        "expected_header",
+        "read_frames",
+        "rejected",
+    )
+
+    def __init__(self, diagnostic: dict[str, Any]) -> None:
+        self.diagnostic = diagnostic
+        self.acknowledged = asyncio.Event()
+        self.rejected = False
+        self.expected_header: bytes | None = None
+        self.read_frames: list[bytes] = []
+
+    def handle_notification(self, _sender: int, data: bytearray) -> None:
+        frame = bytes(data)
+        if self.diagnostic["phase"] in ("preflight", "readback"):
+            if frame[:2] in (b"\x36\x12", b"\x35\x12"):
+                self.read_frames.append(frame)
+            return
+        # Retain only headers/counts: never include user names/payloads.
+        self.diagnostic["last_reply_header"] = frame[:4].hex()
+        self.diagnostic["last_reply_length"] = len(frame)
+        if frame == b"\x34\x00":
+            self.acknowledged.set()
+            return
+        if len(frame) < 3 or frame[0] != 0x34:
+            return
+        # Name-write replies echo the part index and output index.
+        # Unlike name READ replies, byte 2 is not a countdown.
+        # F0 signals a rejected/unsupported command, not success.
+        if frame[2] == 0xF0 or (len(frame) > 3 and frame[3] == 0xF0):
+            self.rejected = True
+            self.acknowledged.set()
+        elif frame[:4] == self.expected_header:
+            self.acknowledged.set()
+
+
+class StatelessSolemClient:
+    """Connect-per-operation BLE client for a single Solem BL-IP controller."""
+
+    def __init__(
+        self,
+        mac_address: str,
+        bluetooth_timeout: float = DEFAULT_BLUETOOTH_TIMEOUT,
+        *,
+        mock: bool = False,
+        max_station_num: int = MAX_STATION_NUM,
+        ble_device: BLEDevice | None = None,
+        ble_device_resolver: Callable[[], BLEDevice | None] | None = None,
+    ) -> None:
+        self.mac_address = mac_address
+        self.bluetooth_timeout = bluetooth_timeout
+        self.mock = mock
+        self.max_station_num = max_station_num
+        self._ble_device_resolver = ble_device_resolver
+        self._ble_device: BLEDevice | None = ble_device
+        self._ble_device_cached_at: float | None = None
+        self._link_dropped = False
+        self._drop_event = asyncio.Event()
+        self._active_client: BleakClient | None = None
+        self._connecting_client: BleakClient | None = None
+        self._cleanup_tasks: set[asyncio.Task[Any]] = set()
+        self._transaction_lock = controller_lock(mac_address)
+        self.last_snapshot: ProgramSnapshot | None = None
+        self._mock_snapshot: ProgramSnapshot | None = None
+        self.program_write_diagnostics: dict[str, Any] = {}
+        self.station_name_write_diagnostics: dict[str, Any] = {}
+        self._mock_station_names: StationNameSnapshot | None = None
+        # Effective user-facing station width. Falls back to the
+        # constructor value until the first full station-name read adopts
+        # the device-reported count (#57). Adoption is UPWARD-ONLY (D1,
+        # adversarial review of #57): the device reports every configured
+        # slot in the name read even when the higher outputs carry no
+        # onboard names (fresh install, names live HA-side), so the
+        # highest named output can legitimately undershoot the true
+        # width. A name read can raise the count (a rename names an
+        # empty slot) but never lower it, or live status for the higher
+        # stations would be dropped and HA would force-mark them
+        # inactive mid-program.
+        self.station_count = max_station_num
+
+    # -- device resolution -------------------------------------------------
+
+    async def _resolve_ble_device(self) -> BLEDevice:
+        """Resolve HA routing afresh; cache only standalone scanner results."""
+        if (
+            self._ble_device_resolver is None
+            and
+            self._ble_device is not None
+            and self._ble_device_cached_at is not None
+            and time.monotonic() - self._ble_device_cached_at < BLE_DEVICE_CACHE_TTL
+        ):
+            return self._ble_device
+        self._ble_device = None
+
+        if self._ble_device_resolver is not None:
+            ble_device = self._ble_device_resolver()
+            if ble_device is not None:
+                self._ble_device = ble_device
+                self._ble_device_cached_at = time.monotonic()
+                return ble_device
+            raise SolemConnectionError("Device not found! Failed connecting!")
+
+        last_round = 2
+        for round_idx in range(3):
+            ble_device = await BleakScanner.find_device_by_address(
+                self.mac_address, timeout=10.0
+            )
+            if ble_device is not None:
+                self._ble_device = ble_device
+                self._ble_device_cached_at = time.monotonic()
+                return ble_device
+
+            devices = await BleakScanner.discover(timeout=10.0)
+            for device in devices:
+                if (device.address or "").lower() == self.mac_address.lower():
+                    self._ble_device = device
+                    self._ble_device_cached_at = time.monotonic()
+                    return device
+
+            if round_idx < last_round:
+                await asyncio.sleep(1.0)
+
+        raise SolemConnectionError("Device not found! Failed connecting!")
+
+    def _ble_device_callback(self) -> BLEDevice:
+        if self._ble_device_resolver is not None:
+            ble_device = self._ble_device_resolver()
+            if ble_device is not None:
+                self._ble_device = ble_device
+                self._ble_device_cached_at = time.monotonic()
+                return ble_device
+        if self._ble_device is None:
+            raise SolemConnectionError("Device not found! Failed connecting!")
+        return self._ble_device
+
+    # -- connection core ---------------------------------------------------
+
+    def _on_disconnected(self, _client: BleakClient) -> None:
+        """Backend disconnect callback: raise a drop *hint*.
+
+        The callback alone must not fail the operation: backends deliver it
+        through wrapper objects (service cache, ESPHome backend clients),
+        its client argument is not reliably connection-unique, and
+        ``establish_connection`` reuses one callback across its internal
+        attempts — so a hint can be stale or concern a superseded
+        connection. It is only consulted by :meth:`_check_drop`, which
+        requires the active client to confirm it is actually disconnected
+        before raising; a hint with a still-connected client is stale and
+        cleared.
+        """
+        self._link_dropped = True
+        self._drop_event.set()
+
+    async def _connect(self) -> BleakClient:
+        """Connect once, with the disconnect-callback hint armed.
+
+        ``establish_connection`` is called with ``max_attempts=1``: the
+        controller is a single-connection device that stops advertising
+        during and after a connect attempt, so an immediate internal retry
+        would be guaranteed to fail. Any retries happen at the
+        operation level, spaced by ``REQUEST_RETRY_DELAY``.
+
+        The hint is cleared before returning so the operation starts from
+        a clean signal state and any *new* hint that arrives is meaningful.
+        """
+        ble_device = await self._resolve_ble_device()
+        connect_kwargs: dict[str, Any] = {}
+        if self._ble_device_resolver is not None:
+            connect_kwargs["ble_device_callback"] = self._ble_device_callback
+        owner = self
+
+        class OwnedClient(BleakClientWithServiceCache):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                owner._connecting_client = self
+
+        try:
+            client = await establish_connection(
+                OwnedClient,
+                ble_device,
+                name=f"Solem - {self.mac_address}",
+                timeout=self.bluetooth_timeout,
+                # Single-connection device: the controller stops advertising during
+                # and for tens of seconds after any connection attempt, so an
+                # immediate internal retry (bleak-retry-connector's default
+                # double-tap) is guaranteed to fail and burns the operation
+                # deadline. One attempt per establish_connection call; retries are
+                # provided by the operation-level flat loop, spaced by
+                # REQUEST_RETRY_DELAY (see REQUEST_MAX_ATTEMPTS).
+                max_attempts=1,
+                disconnected_callback=self._on_disconnected,
+                **connect_kwargs,
+            )
+        except BleakOutOfConnectionSlotsError as exc:
+            raise SolemConnectionError(
+                "Bluetooth adapter/proxy out of connection slots or device busy"
+            ) from exc
+        except (BleakError, TimeoutError, OSError) as exc:
+            raise SolemConnectionError(
+                f"Failed connecting to device: {exc}"
+            ) from exc
+        except Exception as exc:
+            raise SolemConnectionError(
+                f"Unexpected BLE connection error: {exc}"
+            ) from exc
+        self._link_dropped = False
+        self._drop_event.clear()
+        return client
+
+    async def _connect_within(self, remaining: float) -> BleakClient:
+        """Wait for :meth:`_connect` within the remaining operation budget.
+
+        ``asyncio.wait_for`` raises a *bare* TimeoutError whose ``str()``
+        is empty, which made the ``Attempt N failed:`` log line carry no
+        reason and cost live triage time. The timeout is re-raised as
+        :class:`_ConnectTimedOut` — a subclass of ``asyncio.TimeoutError``
+        with the connect-phase context baked in — so every existing except
+        clause that matches the bare timeout keeps matching.
+        """
+        try:
+            return await asyncio.wait_for(self._connect(), timeout=remaining)
+        except asyncio.TimeoutError as exc:
+            if isinstance(exc, _ConnectTimedOut):
+                raise
+            raise _ConnectTimedOut(
+                f"Connect phase timed out after {remaining:.0f}s "
+                "(device not advertising, out of range, or refusing "
+                "connections)"
+            ) from exc
+
+    # -- the stateless executor --------------------------------------------
+
+    async def _watch_drop(self, client: BleakClient) -> None:
+        """Wait for a drop *confirmed* by the client itself.
+
+        Races the hint event against a periodic liveness poll of the active
+        client; the watcher only completes when ``is_connected`` is False.
+        A bare hint (callback without confirmation — stale, or delivered by
+        a superseded connection) never satisfies it.
+        """
+        while True:
+            if not client.is_connected:
+                return
+            if self._drop_event.is_set():
+                self._link_dropped = False
+                self._drop_event.clear()
+            await asyncio.sleep(0.25)
+
+    def _check_drop(self) -> None:
+        """Raise if the link dropped, confirmed by the active client.
+
+        The disconnect callback is only a hint (see :meth:`_on_disconnected`).
+        The hint is acted on only when the active client confirms it is no
+        longer connected; a hint with a still-connected client is stale
+        noise and is cleared so it cannot accumulate into a later failure.
+        """
+        if not self._link_dropped:
+            return
+        active = self._active_client
+        if active is not None and not active.is_connected:
+            raise _DropDetected()
+        self._link_dropped = False
+        self._drop_event.clear()
+
+    def transaction(self) -> Any:
+        """Return the shared, task-reentrant controller transaction."""
+        return self._transaction_lock.hold()
+
+    @property
+    def cleanup_pending(self) -> bool:
+        """Return whether a prior operation still owns unresolved cleanup."""
+        return self._transaction_lock.recover is not None
+
+    def _retain_cleanup_task(self, task: asyncio.Task[Any]) -> None:
+        self._cleanup_tasks.add(task)
+
+        def finished(done: asyncio.Task[Any]) -> None:
+            self._cleanup_tasks.discard(done)
+            if not done.cancelled():
+                try:
+                    done.result()
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug("BLE cleanup task failed", exc_info=True)
+
+        task.add_done_callback(finished)
+
+    async def _disconnect_quietly(self, client: BleakClient) -> bool:
+        """Try several bounded disconnects and report whether the link released."""
+        for _ in range(2):
+            task = asyncio.create_task(client.disconnect())
+            self._retain_cleanup_task(task)
+            done, _ = await asyncio.wait({task}, timeout=DISCONNECT_CLEANUP_TIMEOUT)
+            if not done:
+                task.cancel()
+                return False
+            try:
+                task.result()
+            except (Exception, asyncio.CancelledError):
+                _LOGGER.debug("BLE disconnect attempt failed", exc_info=True)
+            if not client.is_connected:
+                return True
+        return False
+
+    async def _recover_cleanup(self, client: BleakClient | None) -> bool:
+        """Retry one unresolved cleanup without racing its retained tasks."""
+        if any(not task.done() for task in self._cleanup_tasks):
+            return False
+        recovered = await self._cleanup(client, [])
+        if recovered:
+            _LOGGER.info(
+                "%s - Bluetooth cleanup completed; automatic connections resumed",
+                self.mac_address,
+            )
+        return recovered
+
+    async def _cleanup(
+        self, client: BleakClient | None, tasks: list[asyncio.Task[Any]]
+    ) -> bool:
+        """Bound cancellation cleanup and defer reuse while work remains."""
+
+        async def finish() -> bool:
+            for task in tasks:
+                task.cancel()
+                self._retain_cleanup_task(task)
+            pending: set[asyncio.Task[Any]] = set()
+            if tasks:
+                _, pending = await asyncio.wait(tasks, timeout=2.0)
+            released = client is None or await self._disconnect_quietly(client)
+            if pending:
+                _, pending = await asyncio.wait(pending, timeout=2.0)
+            return released and not pending
+
+        cleanup = asyncio.create_task(finish())
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        released = cleanup.result()
+        if not released:
+            self._transaction_lock.defer_cleanup(
+                lambda: self._recover_cleanup(client)
+            )
+            _LOGGER.debug(
+                "%s - Bluetooth cleanup pending; the next operation will retry cleanup",
+                self.mac_address,
+            )
+        if cancelled:
+            raise asyncio.CancelledError
+        return released
+
+    async def _run_operation(
+        self,
+        operation: Callable[[BleakClient], Awaitable[_T]],
+        *,
+        deadline: float | None = None,
+        retry_safe: bool = True,
+    ) -> _T:
+        async with self.transaction():
+            return await self._run_operation_locked(
+                operation, deadline=deadline, retry_safe=retry_safe
+            )
+
+    async def _run_operation_locked(
+        self,
+        operation: Callable[[BleakClient], Awaitable[_T]],
+        *,
+        deadline: float | None = None,
+        retry_safe: bool = True,
+    ) -> _T:
+        """Resolve, connect, run, close. Bounded, flat-retried, stateless.
+
+        The deadline covers the whole operation including all retries. In
+        the stateless model every attempt starts from a fresh connection,
+        so the flat loop retries any failure — including a confirmed
+        mid-operation drop: single-client devices can kill a new link while
+        the previous connection is still releasing, and the retry delay
+        gives them that moment. Only the deadline ends the operation.
+        """
+        if self.mock:
+            raise SolemConnectionError("mock client has no BLE operations")
+
+        if deadline is None:
+            # Read at call time so monkeypatching the module constant works.
+            deadline = OPERATION_DEADLINE
+        deadline_at = time.monotonic() + deadline
+        last_error: Exception | None = None
+
+        for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
+            await self._transaction_lock.check_cleanup()
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                raise SolemDeadlineExceeded(
+                    (
+                        f"Operation deadline exceeded after {attempt - 1} attempt(s)"
+                        f": {last_error}"
+                        if last_error
+                        else f"Operation deadline exceeded after {attempt - 1} attempt(s)"
+                    )
+                ) from last_error
+
+            client: BleakClient | None = None
+            op_task: asyncio.Task[_T] | None = None
+            drop_task: asyncio.Task[Any] | None = None
+            try:
+                client = await self._connect_within(remaining)
+                self._active_client = client
+                remaining = deadline_at - time.monotonic()
+                if remaining <= 0:
+                    raise SolemDeadlineExceeded(
+                        "Operation deadline exhausted during connect"
+                    )
+                op_task = asyncio.create_task(
+                    _await_operation(operation(client))
+                )
+                drop_task = asyncio.create_task(self._watch_drop(client))
+                done, _ = await asyncio.wait(
+                    {op_task, drop_task},
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if drop_task in done:
+                    # Confirmed drop (client says it is disconnected): abort
+                    # the attempt immediately instead of hanging on the dead
+                    # link; the flat retry reconnects fresh.
+                    raise SolemConnectionError(
+                        "BLE link dropped during operation"
+                    )
+                if op_task not in done:
+                    raise asyncio.TimeoutError(
+                        f"Operation deadline exceeded during attempt {attempt}"
+                    )
+                return op_task.result()
+            except asyncio.CancelledError:
+                raise
+            except SolemDeadlineExceeded:
+                raise
+            except (InvalidSnapshot, StaleProgram):
+                # Deterministic data verdicts: reconnecting cannot change the
+                # controller's answer, so retrying only burns the deadline
+                # budget and finally masks the precise cause as
+                # SolemDeadlineExceeded. Surface them unwrapped.
+                raise
+            except (
+                asyncio.TimeoutError,
+                BleakError,
+                OSError,
+                SolemConnectionError,
+                _DropDetected,
+            ) as exc:
+                last_error = exc
+                _LOGGER.debug(
+                    "%s - Attempt %d failed: %s",
+                    self.mac_address,
+                    attempt,
+                    exc,
+                )
+                if not retry_safe:
+                    raise
+            finally:
+                try:
+                    await self._cleanup(
+                        client or self._connecting_client,
+                        [
+                            task
+                            for task in (op_task, drop_task)
+                            if task is not None
+                        ],
+                    )
+                finally:
+                    self._active_client = None
+                    self._connecting_client = None
+                    self._link_dropped = False
+                    self._drop_event.clear()
+
+            if (
+                time.monotonic() < deadline_at
+                and attempt < REQUEST_MAX_ATTEMPTS
+            ):
+                await asyncio.sleep(REQUEST_RETRY_DELAY)
+
+        raise SolemDeadlineExceeded(
+            (
+                f"Operation deadline exceeded after {REQUEST_MAX_ATTEMPTS} attempt(s)"
+                f": {last_error}"
+                if last_error
+                else "Operation deadline exceeded after "
+                f"{REQUEST_MAX_ATTEMPTS} attempt(s)"
+            )
+        ) from last_error
+
+    # -- shared operation helpers ------------------------------------------
+
+    def _ensure_client(self, client: BleakClient, phase: str) -> None:
+        if not client.is_connected:
+            raise SolemConnectionError(f"Client disconnected before {phase}")
+        self._check_drop()
+
+    async def _start_notify(
+        self,
+        client: BleakClient,
+        handler: Callable[[Any, bytearray], None],
+    ) -> None:
+        """Subscribe to status notifications with settle time and retries."""
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            self._check_drop()
+            try:
+                if attempt == 0:
+                    await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+                else:
+                    await asyncio.sleep(NOTIFY_PARTIAL_RETRY_DELAY)
+                self._check_drop()
+                await client.start_notify(NOTIFY_CHAR_UUID, handler)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                _LOGGER.debug(
+                    "%s - start_notify attempt %s failed: %s",
+                    self.mac_address,
+                    attempt + 1,
+                    exc,
+                )
+                try:
+                    await client.stop_notify(NOTIFY_CHAR_UUID)
+                except Exception:  # noqa: BLE001
+                    pass
+        raise SolemConnectionError(
+            "Failed to subscribe to status notifications"
+        ) from last_exc
+
+    async def _write(self, client: BleakClient, payload: bytes) -> None:
+        self._check_drop()
+        if not client.is_connected:
+            raise SolemConnectionError("Client disconnected before write")
+        try:
+            await client.write_gatt_char(WRITE_CHAR_UUID, payload, response=False)
+        except BleakError as exc:
+            raise SolemConnectionError("BLE write failed") from exc
+
+    async def _stop_notify(self, client: BleakClient) -> None:
+        try:
+            await client.stop_notify(NOTIFY_CHAR_UUID)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("%s - stop_notify: %s", self.mac_address, exc)
+
+    async def _wait_for_event(
+        self,
+        event: asyncio.Event,
+        timeout: float,
+        what: str,
+    ) -> None:
+        """Wait on an event, aborting early if the link dropped."""
+        wait_task = asyncio.create_task(event.wait())
+        stage_deadline = time.monotonic() + timeout
+        try:
+            while not event.is_set():
+                self._check_drop()
+                remaining = stage_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SolemConnectionError(f"Timeout waiting for {what}")
+                done, _ = await asyncio.wait(
+                    {wait_task}, timeout=min(remaining, 0.5)
+                )
+                if wait_task in done:
+                    return
+                self._check_drop()
+        finally:
+            wait_task.cancel()
+
+    # -- public API ----------------------------------------------------------
+
+    async def connect(self) -> None:
+        """Verify the device is reachable and exposes the write characteristic."""
+
+        async def _op(client: BleakClient) -> None:
+            services = getattr(client, "services", None)
+            if services is None:
+                raise SolemConnectionError("Services not available on BLE client")
+            for service in services:
+                for char in service.characteristics:
+                    if str(char.uuid).lower() == WRITE_CHAR_UUID.lower():
+                        if (
+                            "write" in char.properties
+                            or "write-without-response" in char.properties
+                        ):
+                            return
+            raise SolemConnectionError("Device isn't suitable!")
+
+        await self._run_operation(_op)
+
+    @asynccontextmanager
+    async def raw_ble_session(self) -> AsyncIterator[SolemRawBleSession]:
+        """Open a connected raw BLE session for validation/debug capture tooling.
+
+        The caller owns the link for the duration of the block; the client is
+        always released on exit, including on error. Not a normal operation:
+        there is no deadline, retry, or drop detection — the caller drives
+        writes/notifications directly against the resolved characteristics.
+        """
+        if self.mock:
+            raise SolemConnectionError("Raw BLE sessions are unavailable in mock mode")
+
+        async with self.transaction():
+            await self._transaction_lock.check_cleanup()
+            client = await self._connect()
+            self._active_client = client
+            try:
+                yield SolemRawBleSession(
+                    client=client,
+                    notify_characteristic=_find_characteristic(client, NOTIFY_CHAR_UUID),
+                    write_characteristic=_find_characteristic(client, WRITE_CHAR_UUID),
+                )
+            finally:
+                if self._active_client is client:
+                    self._active_client = None
+                    self._link_dropped = False
+                    self._drop_event.clear()
+                await self._cleanup(client, [])
+
+    async def get_status(self, *, include_raw: bool = False) -> dict[str, Any]:
+        """Poll status via commit (triggers seq 0x02 notification)."""
+        if self.mock:
+            return protocol.mock_status()
+
+        async def _op(client: BleakClient) -> dict[str, Any]:
+            status_result: dict[str, Any] = {}
+            status_event = asyncio.Event()
+
+            def notification_handler(_sender: int, data: bytearray) -> None:
+                # station_count follows the device-reported width once the
+                # name read ran (#57); max_station_num is the fallback.
+                parsed = protocol.parse_status_notification(
+                    data, max_station_num=self.station_count
+                )
+                if parsed is not None:
+                    status_result.update(parsed)
+                    if include_raw:
+                        status_result["raw_notification_hex"] = bytes(data).hex()
+                    _LOGGER.debug(
+                        "%s - Status notification (seq=2): %s",
+                        self.mac_address,
+                        status_result,
+                    )
+                    status_event.set()
+                    return
+
+                station_num = status_result.get("station_num")
+                if (
+                    len(data) >= 3
+                    and data[2] == 0x01
+                    and status_result.get("is_watering")
+                    and station_num is not None
+                    and status_result.get("remaining_seconds") is None
+                    and (
+                        remaining := protocol.parse_intermediate_remaining(
+                            data,
+                            station_num,
+                            max_station_num=self.station_count,
+                        )
+                    )
+                    is not None
+                ):
+                    status_result["remaining_seconds"] = remaining
+                    _LOGGER.debug(
+                        "%s - Remaining time from seq=1 notification: %ss (station %s)",
+                        self.mac_address,
+                        remaining,
+                        station_num,
+                    )
+                    status_event.set()
+
+            await self._start_notify(client, notification_handler)
+            await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+            self._ensure_client(client, phase="status poll")
+            try:
+                await self._write(client, COMMIT_COMMAND)
+                await self._wait_for_event(
+                    status_event, STATUS_NOTIFY_TIMEOUT, "status notification"
+                )
+                if not status_result:
+                    raise SolemConnectionError("Empty status notification")
+                if (
+                    status_result.get("is_watering")
+                    and status_result.get("remaining_seconds") is None
+                    and (status_result.get("station_num") or 0) >= 3
+                ):
+                    await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+                return status_result
+            finally:
+                await self._stop_notify(client)
+
+        return await self._run_operation(_op)
+
+    async def get_firmware_version(self) -> protocol.FirmwareVersion:
+        """Read the firmware version stored on the V5 controller."""
+        request = protocol.pack_get_firmware_version()
+        if self.mock:
+            return {
+                "major": 5,
+                "minor": 0,
+                "patch": 0,
+                "raw_hex": "5.0.0",
+                "controller_name": f"Solem {self.mac_address}",
+            }
+
+        async def _op(client: BleakClient) -> protocol.FirmwareVersion:
+            firmware_version: protocol.FirmwareVersion | None = None
+            firmware_event = asyncio.Event()
+            name_event = asyncio.Event()
+            controller_name: str | None = None
+
+            def notification_handler(_sender: int, data: bytearray) -> None:
+                nonlocal firmware_version, controller_name
+                name = protocol.parse_controller_name_response(data)
+                if name is not None:
+                    controller_name = name
+                    name_event.set()
+                parsed = protocol.parse_firmware_version_response(data)
+                if parsed is None:
+                    return
+                firmware_version = parsed
+                _LOGGER.debug(
+                    "%s - Firmware version notification: %s",
+                    self.mac_address,
+                    bytes(data).hex(),
+                )
+                firmware_event.set()
+
+            await self._start_notify(client, notification_handler)
+            await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+            self._ensure_client(client, phase="firmware version read")
+            try:
+                await self._write(client, request)
+                await self._wait_for_event(
+                    firmware_event, STATUS_NOTIFY_TIMEOUT, "firmware version"
+                )
+                if firmware_version is None:
+                    raise SolemConnectionError("Empty firmware version response")
+                # The controller-name record is optional metadata: wait for
+                # it only briefly and never fail the firmware read when it
+                # is missing or malformed. Cancellation propagates and the
+                # connection is released by the operation wrapper.
+                if not name_event.is_set():
+                    try:
+                        await asyncio.wait_for(
+                            name_event.wait(), IDENTIFICATION_NAME_TIMEOUT
+                        )
+                    except TimeoutError:
+                        pass  # Name metadata is optional; firmware is already valid.
+                if controller_name is not None:
+                    firmware_version["controller_name"] = controller_name
+                return firmware_version
+            finally:
+                await self._stop_notify(client)
+
+        return await self._run_operation(_op)
+
+    async def get_station_name(self, station: int) -> str:
+        """Read a station name stored on the V5 controller."""
+        if not 1 <= station <= self.max_station_num:
+            raise ValueError(f"station must be between 1 and {self.max_station_num}")
+        if self.mock:
+            return f"Station {station}"
+        return (await self.get_station_names())[station]
+
+    async def get_station_names(self) -> dict[int, str]:
+        """Read names for each configured station from the V5 controller."""
+        request = protocol.pack_get_station_names()
+        if self.mock:
+            return {
+                station: f"Station {station}"
+                for station in range(1, self.max_station_num + 1)
+            }
+
+        async def _op(client: BleakClient) -> dict[int, str]:
+            fragments: dict[int, dict[int, bytes]] = {}
+            station_names: dict[int, str] = {}
+            last_fragment_at: float | None = None
+
+            def notification_handler(_sender: int, data: bytearray) -> None:
+                nonlocal last_fragment_at
+                parsed = protocol.parse_station_name_fragment(data)
+                if parsed is None:
+                    return
+                last_fragment_at = time.monotonic()
+                if not 1 <= parsed["station"] <= self.max_station_num:
+                    return
+                station = parsed["station"]
+                fragments.setdefault(station, {})[parsed["sequence"]] = parsed[
+                    "name_bytes"
+                ]
+                _LOGGER.debug(
+                    "%s - Station %s name fragment (seq=%s): %s",
+                    self.mac_address,
+                    station,
+                    parsed["sequence"],
+                    bytes(data).hex(),
+                )
+                if fragments[station].keys() >= {0, 1}:
+                    station_fragments = fragments[station]
+                    station_names[station] = (
+                        station_fragments[1] + station_fragments[0]
+                    ).decode("utf-8", errors="replace")
+
+            async def _wait_for_station_names() -> dict[int, str]:
+                stage_deadline = time.monotonic() + STATUS_NOTIFY_TIMEOUT
+                while True:
+                    now = time.monotonic()
+                    if (
+                        station_names
+                        and last_fragment_at is not None
+                        and now - last_fragment_at >= STATION_NAMES_IDLE_TIMEOUT
+                    ):
+                        return station_names
+                    if now >= stage_deadline:
+                        if station_names:
+                            return station_names
+                        raise SolemConnectionError(
+                            "Timeout waiting for station names"
+                        )
+                    self._check_drop()
+                    await asyncio.sleep(0.05)
+
+            await self._start_notify(client, notification_handler)
+            await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+            self._ensure_client(client, phase="station names read")
+            try:
+                await self._write(client, request)
+                return await _wait_for_station_names()
+            finally:
+                await self._stop_notify(client)
+
+        return await self._run_operation(_op)
+
+    async def get_station_name_snapshot(self) -> StationNameSnapshot:
+        """Read all name fragments, rejecting partial or conflicting results.
+
+        Unlike :meth:`get_station_names`, which returns whatever arrived
+        within the idle window, this is the safety-grade read used before
+        and after name writes: the snapshot is only returned when every
+        reported output contributed both halves and the sequence IDs are
+        contiguous. The session discipline mirrors the write-preflight
+        flow: one short subscribed operation with retries disabled — a
+        confirmed mid-read link drop surfaces immediately as
+        :class:`SolemConnectionError` instead of being retried into a
+        deadline mask, and :class:`InvalidSnapshot` verdicts stay
+        unwrapped. The device-derived station count is adopted
+        upward-only from the validated snapshot (see
+        :meth:`_read_station_names_on_connection`).
+        """
+        if self.mock:
+            if self._mock_station_names is None:
+                self._mock_station_names = StationNameSnapshot(
+                    {
+                        i: f"Station {i}".encode().ljust(32, b"\0")
+                        for i in range(1, self.max_station_num + 1)
+                    }
+                )
+            return self._mock_station_names
+
+        async def _op(client: BleakClient) -> StationNameSnapshot:
+            frames: list[bytes] = []
+
+            def notification_handler(_sender: int, data: bytearray) -> None:
+                if data[:2] in (b"\x36\x12", b"\x35\x12"):
+                    frames.append(bytes(data))
+
+            await self._start_notify(client, notification_handler)
+            try:
+                await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+                self._ensure_client(
+                    client, phase="station-name snapshot read"
+                )
+                return await self._read_station_names_on_connection(client, frames)
+            finally:
+                await self._stop_notify(client)
+
+        # retry_safe=False mirrors write_station_name's preflight: a
+        # confirmed drop during the read is a precise verdict, not a
+        # transient worth masking behind the deadline.
+        return await self._run_operation(_op, retry_safe=False)
+
+    async def _read_station_names_on_connection(
+        self, client: BleakClient, frames: list[bytes]
+    ) -> StationNameSnapshot:
+        """Collect a complete name response on an already subscribed connection.
+
+        A *silent* dead link — the ``35 00`` write accepted, then zero
+        notification frames through consecutive idle windows while the
+        backend still reports ``is_connected`` — surfaces as
+        :class:`SolemConnectionError` (issue #136), never as
+        :class:`InvalidSnapshot`: a zero-frame response is a transport
+        verdict, not a data verdict, and mislabelling it defeats both the
+        caller's retry heuristics and the error message the user sees.
+        """
+        frames.clear()
+        await self._write(client, protocol.pack_get_station_names())
+        deadline = time.monotonic() + STATUS_NOTIFY_TIMEOUT
+        last_received = time.monotonic()
+        count = len(frames)
+        last_rejected_count = -1
+        while time.monotonic() < deadline:
+            self._check_drop()
+            if not client.is_connected:
+                # A confirmed-dead link wins over the data verdict: without
+                # this the idle-window validation can fire first (idle
+                # timeout 0 or fragments cut mid-stream) and mask the drop
+                # as a confusing InvalidSnapshot.
+                raise SolemConnectionError(
+                    "BLE link dropped during station-name read"
+                )
+            if len(frames) != count:
+                count = len(frames)
+                last_received = time.monotonic()
+            if time.monotonic() - last_received >= STATION_NAMES_IDLE_TIMEOUT:
+                # A zero-frame response is transport, not data: the write
+                # was accepted (or _write would have raised) yet not a
+                # single notification arrived. Issue #136 showed this
+                # shape is a dead link the backend's is_connected has not
+                # reflected yet (ESPHome proxies report GATT
+                # NOT_CONNECTED on the teardown that follows), so raise
+                # the connection error the caller's retry policy is
+                # written for instead of a misleading InvalidSnapshot.
+                # The first zero-frame idle window still grants the same
+                # grace cycle as a partial response; only the second
+                # consecutive empty window is the verdict. Nonzero
+                # partial responses keep the from_frames path below:
+                # those are genuine data verdicts.
+                if not frames:
+                    if last_rejected_count == 0:
+                        # SolemSilentLink, not a bare SolemConnectionError:
+                        # the persistent client answers this verdict with an
+                        # in-place re-request on the same link (issue #136)
+                        # and must be able to tell it apart from a confirmed
+                        # dead link without string-matching the message.
+                        raise SolemSilentLink(
+                            "No station-name notifications received; "
+                            "the BLE link is unresponsive"
+                        )
+                    last_rejected_count = 0
+                else:
+                    try:
+                        snapshot = StationNameSnapshot.from_frames(
+                            frames, self.max_station_num
+                        )
+                    except InvalidSnapshot:
+                        # One grace cycle in case late fragments still
+                        # arrive; if the idle window elapsed again with
+                        # no new frames, the response is final and the
+                        # verdict is precise — never poll until the
+                        # stage deadline and mask it as a
+                        # timeout/UncertainWrite.
+                        if len(frames) == last_rejected_count:
+                            raise
+                        last_rejected_count = len(frames)
+                    else:
+                        # Adopt the device-reported station count (#57):
+                        # UPWARD-ONLY. The device ALWAYS reports every
+                        # configured slot in the name read (real captures:
+                        # 12 at every width), so slots with no onboard name
+                        # still arrive in the response and
+                        # snapshot.station_count (highest named output) can
+                        # legitimately be LOWER than the true width on fresh
+                        # installs whose names live HA-side. Shrinking to it
+                        # would drop live status for the higher stations (HA
+                        # would force-mark them inactive mid-program), so a
+                        # name read can only RAISE the count (e.g. a rename
+                        # names empty slot 7), never lower it: the
+                        # constructor width stays the floor. KNOWN
+                        # LIMITATION (S1, stale adoption): the raised floor
+                        # is deliberately never reset on disconnect —
+                        # reconnection keeps the wider count until process
+                        # replacement (no reset mechanism by design here).
+                        adopted = snapshot.station_count
+                        if not any(snapshot.names.values()):
+                            # D2: with no named output at all, the snapshot
+                            # count is the all-empty fallback (highest
+                            # reported slot, can reach 12) which EXCEEDS the
+                            # validated width; clamp it so the fallback can
+                            # never push the adopted count above
+                            # max_station_num through the max() below.
+                            adopted = min(adopted, self.max_station_num)
+                        self.station_count = max(self.station_count, adopted)
+                        return snapshot
+            await asyncio.sleep(0.05)
+        raise InvalidSnapshot("Timeout waiting for complete station names")
+
+    async def write_station_name(
+        self,
+        station: int,
+        name: str,
+        expected: StationNameSnapshot,
+        *,
+        before: StationNameSnapshot,
+    ) -> StationNameSnapshot:
+        """Check, write once and verify names with one short, subscribed session.
+
+        ``before`` must come from a fresh :meth:`get_station_name_snapshot`
+        the caller treats as the editor's baseline. The method refuses to
+        write when the controller no longer matches that baseline
+        (stale-edit rejection), sends exactly the two 0x33 frames for the
+        selected output with per-part acknowledgement matching, then reads
+        the complete names back on the same connection and verifies them
+        against ``expected``. Any failure after the first write frame is
+        surfaced as :class:`UncertainWrite`: the caller must refresh and
+        reconcile deliberately; the write is never replayed.
+        """
+        frames = protocol.pack_station_name(station, name, self.max_station_num)
+        if self.mock:
+            self._mock_station_names = expected
+            return expected
+
+        async def _op(client: BleakClient) -> StationNameSnapshot:
+            self.station_name_write_diagnostics = {
+                "phase": "subscribe",
+                "acknowledged_parts": 0,
+            }
+            session = _StationNameWriteSession(self.station_name_write_diagnostics)
+
+            await self._start_notify(client, session.handle_notification)
+            try:
+                await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+                self._ensure_client(
+                    client, phase="station-name write preflight"
+                )
+                self.station_name_write_diagnostics["phase"] = "preflight"
+                current = await self._read_station_names_on_connection(
+                    client, session.read_frames
+                )
+                if current.revision != before.revision:
+                    raise StaleProgram(
+                        "Station names changed before writing; refresh the editor"
+                    )
+                for part, frame in enumerate(frames):
+                    session.expected_header = b"\x34" + frame[1:4]
+                    session.acknowledged.clear()
+                    session.rejected = False
+                    self.station_name_write_diagnostics.update(
+                        phase="await_ack", part=part
+                    )
+                    await self._write(client, frame)
+                    await self._wait_for_event(
+                        session.acknowledged,
+                        STATUS_NOTIFY_TIMEOUT,
+                        f"station-name part {part} acknowledgement",
+                    )
+                    if session.rejected:
+                        raise UncertainWrite(
+                            "Controller rejected the station-name command"
+                        )
+                    self.station_name_write_diagnostics["acknowledged_parts"] = part + 1
+                self.station_name_write_diagnostics["phase"] = "readback"
+                actual = await self._read_station_names_on_connection(
+                    client, session.read_frames
+                )
+                if actual.revision != expected.revision:
+                    self.station_name_write_diagnostics["phase"] = "readback_mismatch"
+                    raise UncertainWrite(
+                        "Station-name verification failed; reopen the editor to review"
+                    )
+                self.station_name_write_diagnostics["phase"] = "verified"
+                return actual
+            finally:
+                await self._stop_notify(client)
+
+        try:
+            return await self._run_operation(_op, retry_safe=False)
+        except UncertainWrite:
+            raise
+        except (StaleProgram, InvalidSnapshot):
+            # Preflight/verification verdicts are precise: never obscure
+            # them with an uncertain-outcome wrapper.
+            raise
+        except Exception as exc:
+            raise UncertainWrite(
+                "Station-name write outcome is uncertain; refresh before retrying"
+            ) from exc
+
+    async def get_irrigation_config(
+        self,
+    ) -> dict[int, protocol.IrrigationProgram]:
+        """Read persisted irrigation programs (A/B/C) from the V5 controller."""
+        request = protocol.pack_get_irrigation_config()
+        if self.mock:
+            if self._mock_snapshot is None:
+                frames: list[bytes] = []
+                for program_index in range(protocol.IRRIGATION_PROGRAM_COUNT):
+                    program: protocol.IrrigationProgram = {
+                    "name": f"Program {chr(ord('A') + program_index)}",
+                    "inter_station_delay": 0,
+                    "water_budget": 100,
+                    "cycle": 0,
+                    "week_days": 0x7F,
+                    "period_length": 1,
+                    "synchro_day": 0,
+                    "period_start_date": None,
+                    "controller_date": None,
+                    "start_times": [420 + program_index * 60, None, None, None, None, None, None, None],
+                        "station_durations": [
+                            600 if station == 0 else 0
+                            for station in range(protocol.MAX_PROGRAM_STATIONS)
+                        ],
+                    }
+                    writes = protocol.pack_set_irrigation_program(
+                        program_index,
+                        program,
+                        max_stations=protocol.MAX_PROGRAM_STATIONS,
+                    )
+                    frames.extend(
+                        frame[:2] + bytes([6 - chunk]) + frame[3:]
+                        for chunk, frame in enumerate(writes)
+                    )
+                self._mock_snapshot = ProgramSnapshot.from_frames(tuple(frames))
+            self.last_snapshot = self._mock_snapshot
+            return self.last_snapshot.programs
+
+        async def _op(client: BleakClient) -> dict[int, protocol.IrrigationProgram]:
+            payloads: list[bytes] = []
+            last_fragment_at: float | None = None
+
+            def notification_handler(_sender: int, data: bytearray) -> None:
+                nonlocal last_fragment_at
+                payload = bytes(data)
+                normalized = protocol.normalize_config_notification(payload)
+                if normalized is None or normalized[3] >> 4 != protocol.IRRIGATION_PROGRAM_CLASS:
+                    return
+                # A program write echoes its fragments (normalized op
+                # 0x2F/0x37) on the config characteristic about a second
+                # later; on a persistent connection they can land inside
+                # this read's collection window and collide by fragment id
+                # with read responses (issue #73). Collect read responses
+                # only.
+                if normalized[0] != protocol.IRRIGATION_CONFIG_READ_RESPONSE:
+                    _LOGGER.debug(
+                        "%s - Ignoring irrigation write echo during config read"
+                        " (op=%s, program=%s, fragment=%s): %s",
+                        self.mac_address,
+                        normalized[0],
+                        (normalized[3] & 0x0F),
+                        normalized[2],
+                        payload.hex(),
+                    )
+                    return
+                last_fragment_at = time.monotonic()
+                payloads.append(payload)
+                _LOGGER.debug(
+                    "%s - Irrigation config fragment (program=%s, fragment=%s): %s",
+                    self.mac_address,
+                    (normalized[3] & 0x0F),
+                    normalized[2],
+                    payload.hex(),
+                )
+
+            async def _wait_for_irrigation_config() -> None:
+                stage_deadline = time.monotonic() + STATUS_NOTIFY_TIMEOUT
+                while True:
+                    now = time.monotonic()
+                    if (
+                        protocol.irrigation_config_complete(payloads)
+                        and last_fragment_at is not None
+                        and now - last_fragment_at >= IRRIGATION_CONFIG_IDLE_TIMEOUT
+                    ):
+                        return
+                    if now >= stage_deadline:
+                        if protocol.irrigation_config_complete(payloads):
+                            return
+                        raise SolemConnectionError(
+                            "Timeout waiting for irrigation config"
+                        )
+                    self._check_drop()
+                    await asyncio.sleep(0.05)
+
+            await self._start_notify(client, notification_handler)
+            await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+            self._ensure_client(client, phase="irrigation config read")
+            try:
+                await self._write(client, request)
+                await _wait_for_irrigation_config()
+                if not protocol.irrigation_config_complete(payloads):
+                    raise SolemConnectionError(
+                        "Incomplete irrigation config response"
+                    )
+                snapshot = ProgramSnapshot.from_frames(tuple(payloads))
+                self.last_snapshot = snapshot
+                return snapshot.programs
+            finally:
+                await self._stop_notify(client)
+
+        return await self._run_operation(_op)
+
+    async def get_program_snapshot(self) -> ProgramSnapshot:
+        """Read and return the complete byte-preserving V5 program snapshot."""
+        await self.get_irrigation_config()
+        if self.last_snapshot is None:
+            raise InvalidSnapshot("No complete program snapshot available")
+        return self.last_snapshot
+
+    async def write_program_frames(
+        self,
+        frames: list[bytes],
+        expected: ProgramSnapshot,
+        before_revision: str,
+    ) -> ProgramSnapshot:
+        """Preflight safely, then write once and verify without replay.
+
+        The fresh revision preflight is a separate read-only, retry-safe
+        operation. The subsequent mutation and full readback use one BLE
+        connection; once that phase starts it is never replayed automatically.
+        Transport failures after the first program frame are surfaced as
+        UncertainWrite.
+        """
+        if self.mock:
+            self._mock_snapshot = self.last_snapshot = expected
+            return expected
+
+        # Preflight is read-only and therefore retry-safe. Perform it as a
+        # normal snapshot operation before opening the no-replay mutation
+        # connection. A transient BLE drop during this safety read may retry;
+        # once a program frame is sent, the transaction below never replays.
+        current = await self.get_program_snapshot()
+        self.program_write_diagnostics = {
+            "phase": "preflight",
+            "acknowledged_blocks": 0,
+        }
+        if current.revision != before_revision:
+            raise StaleProgram(
+                "Programs changed before restore; refresh before writing"
+            )
+        # Tie the expected result to this exact fresh preflight state and the
+        # frames about to be sent before entering the no-replay mutation phase.
+        current.validate_expected_write(frames, expected)
+        _LOGGER.debug(
+            "%s - Program preflight verified on retry-safe read; "
+            "opening no-replay mutation transaction (%d block(s))",
+            self.mac_address,
+            len(frames),
+        )
+
+        request = protocol.pack_get_irrigation_config()
+        mutation_started = False
+        _LOGGER.debug(
+            "%s - Starting transactional program write (%s, %d block(s))",
+            self.mac_address,
+            type(self).__name__,
+            len(frames),
+        )
+
+        async def _op(client: BleakClient) -> ProgramSnapshot:
+            nonlocal mutation_started
+            payloads: list[bytes] = []
+            acknowledged = asyncio.Event()
+            expected_header = b""
+            expected_length = 0
+            rejected = False
+            self.program_write_diagnostics = {
+                "phase": "subscribe",
+                "acknowledged_blocks": 0,
+            }
+
+            def notification_handler(_sender: int, data: bytearray) -> None:
+                nonlocal rejected
+                diagnostic = self.program_write_diagnostics
+                if diagnostic["phase"] in ("preflight", "readback"):
+                    normalized = protocol.normalize_config_notification(data)
+                    if (
+                        normalized is not None
+                        and normalized[3] >> 4 == protocol.IRRIGATION_PROGRAM_CLASS
+                        # Write echoes for the just-written program can
+                        # trail into the readback collection window and
+                        # collide by fragment id with read responses
+                        # (issue #73): collect read responses only.
+                        and normalized[0] == protocol.IRRIGATION_CONFIG_READ_RESPONSE
+                    ):
+                        payloads.append(bytes(data))
+                    return
+                diagnostic["last_reply_header"] = bytes(data[:4]).hex()
+                diagnostic["last_reply_length"] = len(data)
+                if not data or not expected_header or data[0] != expected_header[0]:
+                    return
+                if len(data) >= 3 and (data[2] == 0xF0 or (len(data) > 3 and data[3] == 0xF0)):
+                    rejected = True
+                    acknowledged.set()
+                elif bytes(data) == expected_header[:1] + b"\x00":
+                    acknowledged.set()
+                elif len(data) == expected_length and bytes(data[:4]) == expected_header:
+                    acknowledged.set()
+
+            async def read_snapshot(label: str) -> ProgramSnapshot:
+                self.program_write_diagnostics["phase"] = label
+                payloads.clear()
+                started_at = time.monotonic()
+                _LOGGER.debug(
+                    "%s - Program transaction %s read started (%s)",
+                    self.mac_address,
+                    label,
+                    type(self).__name__,
+                )
+                await self._write(client, request)
+                deadline = time.monotonic() + STATUS_NOTIFY_TIMEOUT
+                previous_count = -1
+                last_fragment_at = time.monotonic()
+                while True:
+                    now = time.monotonic()
+                    if len(payloads) != previous_count:
+                        previous_count = len(payloads)
+                        last_fragment_at = now
+                    if protocol.irrigation_config_complete(payloads) and now - last_fragment_at >= IRRIGATION_CONFIG_IDLE_TIMEOUT:
+                        _LOGGER.debug(
+                            "%s - Program transaction %s read complete: %d fragment(s) in %.2fs",
+                            self.mac_address,
+                            label,
+                            len(payloads),
+                            now - started_at,
+                        )
+                        return ProgramSnapshot.from_frames(tuple(payloads))
+                    if now >= deadline:
+                        if protocol.irrigation_config_complete(payloads):
+                            _LOGGER.debug(
+                                "%s - Program transaction %s read complete at deadline: %d fragment(s) in %.2fs",
+                                self.mac_address,
+                                label,
+                                len(payloads),
+                                now - started_at,
+                            )
+                            return ProgramSnapshot.from_frames(tuple(payloads))
+                        _LOGGER.debug(
+                            "%s - Program transaction %s read timed out: %d fragment(s) in %.2fs",
+                            self.mac_address,
+                            label,
+                            len(payloads),
+                            now - started_at,
+                        )
+                        raise SolemConnectionError("Timeout waiting for irrigation config")
+                    self._check_drop()
+                    await asyncio.sleep(0.05)
+
+            await self._start_notify(client, notification_handler)
+            try:
+                await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+                _LOGGER.debug(
+                    "%s - Program mutation connection ready; starting %d block(s)",
+                    self.mac_address,
+                    len(frames),
+                )
+                for block, frame in enumerate(frames):
+                    expected_header = bytes([frame[0] + 1]) + frame[1:4]
+                    expected_length = len(frame)
+                    acknowledged.clear()
+                    rejected = False
+                    self.program_write_diagnostics.update(phase="await_ack", block=block)
+                    mutation_started = True
+                    await self._write(client, frame)
+                    await self._wait_for_event(
+                        acknowledged,
+                        STATUS_NOTIFY_TIMEOUT,
+                        f"program block {block} acknowledgement",
+                    )
+                    if rejected:
+                        raise ProgramWriteRejected("Controller rejected the program block")
+                    self.program_write_diagnostics["acknowledged_blocks"] = block + 1
+                actual = await read_snapshot("readback")
+                self.last_snapshot = actual
+                if actual.revision != expected.revision:
+                    self.program_write_diagnostics["phase"] = "readback_mismatch"
+                    raise UncertainWrite("Program verification failed; refresh and review the controller")
+                self.program_write_diagnostics["phase"] = "verified"
+                return actual
+            finally:
+                await self._stop_notify(client)
+
+        try:
+            return await self._run_operation(_op, retry_safe=False)
+        except UncertainWrite:
+            raise
+        except Exception as exc:
+            if mutation_started:
+                self.program_write_diagnostics["phase"] = "uncertain"
+                raise UncertainWrite("Program write outcome is uncertain; refresh before retrying") from exc
+            raise
+
+    async def write_irrigation_program(
+        self,
+        program_index: int,
+        program: protocol.IrrigationProgram,
+        *,
+        today: date | None = None,
+    ) -> None:
+        """Write one persisted V5 irrigation program without reading it back.
+
+        This low-level write primitive is intended for callers that need to
+        batch multiple program writes and perform one independent verification
+        after the controller has had time to settle. It deliberately sends the
+        exact same capture-inferred V5 frames as :meth:`set_irrigation_program`
+        and does not append the manual-command commit frame.
+
+        ``today`` is the single write day used for both the controller-owned
+        header date and the derived ``synchro_day`` countdown; callers that
+        also normalize the program should pass the same value so the expected
+        readback and the wire frames agree.
+        """
+        frames = protocol.pack_set_irrigation_program(
+            program_index,
+            program,
+            today=today,
+            # The wire always carries all 12 storage slots, so pack at the full
+            # V5 storage width. This also accepts readback-shaped programs from
+            # get_irrigation_config on a narrower (6-station) client instead of
+            # rejecting their hidden-slot entries with ValueError.
+            max_stations=protocol.MAX_PROGRAM_STATIONS,
+        )
+
+        if self.mock:
+            return
+
+        # Use the smallest possible write path: one fresh BLE session per
+        # frame, with no notification subscription or readback. Notifications
+        # are not consumed by this primitive and can make proxy links fail
+        # before the frame itself is written.
+        for frame_number, frame in enumerate(frames, start=1):
+            async def _op(client: BleakClient, payload: bytes = frame) -> None:
+                self._check_drop()
+                await self._write(client, payload)
+                self._check_drop()
+
+            _LOGGER.debug(
+                "%s - Writing irrigation program %d frame %d/%d",
+                self.mac_address,
+                program_index,
+                frame_number,
+                len(frames),
+            )
+            try:
+                await self._run_operation(_op)
+            except Exception:
+                _LOGGER.warning(
+                    "%s - Irrigation program %d frame %d/%d failed",
+                    self.mac_address,
+                    program_index,
+                    frame_number,
+                    len(frames),
+                )
+                raise
+
+    async def set_irrigation_program(
+        self,
+        program_index: int,
+        program: protocol.IrrigationProgram,
+        *,
+        today: date | None = None,
+        before_revision: str | None = None,
+    ) -> dict[int, protocol.IrrigationProgram]:
+        """Safely patch one program after a fresh revision preflight.
+
+        One write day is shared by the expected-program normalization and the
+        wire write, so the controller-owned header date and the derived
+        ``synchro_day`` countdown always refer to the same day.
+
+        ``today`` is that day. Callers that keep their dates in another time
+        zone (Home Assistant uses its configured zone) pass their own local
+        date, so the packed frame and the readback expectation describe the day
+        the caller shows. ``None`` falls back to ``date.today()``, the process
+        clock.
+        """
+        if today is None:
+            today = date.today()
+        normalized = protocol.normalize_irrigation_program_for_write(
+            program,
+            today=today,
+            max_stations=protocol.MAX_PROGRAM_STATIONS,
+        )
+        async with self.transaction():
+            current = await self.get_program_snapshot()
+            if before_revision is not None and current.revision != before_revision:
+                raise StaleProgram(
+                    "Programs changed since the editor was opened; refresh before writing"
+                )
+            changes = {
+                key: value
+                for key, value in normalized.items()
+                if key
+                not in {"period_start_date", "controller_date", "station_durations"}
+            }
+            station_count = min(
+                self.station_count, len(normalized["station_durations"])
+            )
+            changes["station_durations"] = {
+                station: normalized["station_durations"][station - 1]
+                for station in range(1, station_count + 1)
+            }
+            frames, expected = current.patch(
+                program_index, changes, self.station_count
+            )
+            if expected.revision == current.revision:
+                return current.programs
+            verified = await self.write_program_frames(
+                frames, expected, current.revision
+            )
+            return verified.programs
+
+    async def set_time(self, when: datetime | None = None) -> None:
+        """Push local date/time to the device RTC as a verified transaction.
+
+        The exchange is deferred when the controller is busy (watering or an
+        active program), sent without the commit suffix, and only reported
+        as done after the controller's set-time reply is acknowledged and a
+        follow-up status read confirms the time alarm bit has cleared.
+        Non-retryable: the set-time write is never replayed automatically.
+        Raises ``SolemTimeSyncBusy`` when deferred (safe to retry later);
+        ``SolemTimeSyncRejected`` and ``SolemTimeSyncVerificationFailed``
+        are terminal outcomes — both are ``SolemTimeSyncError`` subtypes,
+        but unlike ``SolemTimeSyncBusy`` they do not mean "retry later".
+        """
+        if self.mock:
+            return
+
+        payload = protocol.pack_set_time(when)
+
+        async def _op(client: BleakClient) -> None:
+            status_result: dict[str, Any] = {}
+            status_event = asyncio.Event()
+            reply_event = asyncio.Event()
+            reply_acknowledged: bool | None = None
+
+            def notification_handler(_sender: int, data: bytearray) -> None:
+                nonlocal reply_acknowledged
+                parsed = protocol.parse_status_notification(
+                    data, max_station_num=self.station_count
+                )
+                if parsed is not None:
+                    status_result.update(parsed)
+                    status_event.set()
+                    return
+                reply = protocol.parse_set_time_reply(data)
+                if reply is None:
+                    return
+                _LOGGER.debug(
+                    "%s - Set-time reply notification: %s",
+                    self.mac_address,
+                    bytes(data).hex(),
+                )
+                reply_acknowledged = reply
+                reply_event.set()
+
+            async def read_status() -> dict[str, Any]:
+                status_result.clear()
+                status_event.clear()
+                await self._write(client, COMMIT_COMMAND)
+                await self._wait_for_event(
+                    status_event, STATUS_NOTIFY_TIMEOUT, "status notification"
+                )
+                if not status_result:
+                    raise SolemConnectionError("Empty status notification")
+                return dict(status_result)
+
+            await self._start_notify(client, notification_handler)
+            await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+            self._ensure_client(client, phase="set-time transaction")
+            try:
+                status = await read_status()
+                if status.get("is_watering"):
+                    raise SolemTimeSyncBusy(
+                        "Time sync deferred: controller is watering"
+                    )
+                if status.get("active_program") is not None:
+                    raise SolemTimeSyncBusy(
+                        "Time sync deferred: controller has an active program"
+                    )
+
+                await self._write(client, payload)
+                await self._wait_for_event(
+                    reply_event, STATUS_NOTIFY_TIMEOUT, "set-time reply"
+                )
+                if reply_acknowledged is False:
+                    raise SolemTimeSyncRejected(
+                        "Controller rejected the time update"
+                    )
+
+                status = await read_status()
+                if status.get("time_alarm"):
+                    raise SolemTimeSyncVerificationFailed(
+                        "Time sync not verified: time alarm still set after "
+                        "acknowledged update"
+                    )
+            finally:
+                await self._stop_notify(client)
+
+        await self._run_operation(_op, retry_safe=False)
+
+    async def _execute_command(
+        self,
+        command: bytes,
+    ) -> protocol.SolemStatus | None:
+        """Send command + commit and wait for device notification ack."""
+        if self.mock:
+            return None
+
+        async def _op(client: BleakClient) -> protocol.SolemStatus | None:
+            response_event = asyncio.Event()
+            last_status: protocol.SolemStatus | None = None
+
+            def notification_handler(_sender: int, data: bytearray) -> None:
+                nonlocal last_status
+                if not protocol.is_command_notification(data):
+                    return
+                parsed = protocol.parse_status_notification(
+                    data, max_station_num=self.station_count
+                )
+                if parsed is not None:
+                    last_status = parsed
+                _LOGGER.debug(
+                    "%s - Command notification (seq=%s): %s",
+                    self.mac_address,
+                    data[2],
+                    bytes(data).hex(),
+                )
+                if data[2] == 0x00:
+                    response_event.set()
+
+            await self._start_notify(client, notification_handler)
+            await asyncio.sleep(NOTIFY_SETTLE_DELAY)
+            self._ensure_client(client, phase="command")
+            try:
+                await self._write(client, command)
+                await self._write(client, protocol.pack_commit())
+                await self._wait_for_event(
+                    response_event, STATUS_NOTIFY_TIMEOUT, "command response"
+                )
+                return last_status
+            finally:
+                await self._stop_notify(client)
+
+        return await self._run_operation(_op)
+
+    async def turn_on(self) -> None:
+        if self.mock:
+            return
+        await self._execute_command(protocol.pack_turn_on())
+
+    async def turn_off_permanent(self) -> None:
+        if self.mock:
+            return
+        await self._execute_command(protocol.pack_turn_off_permanent())
+
+    async def turn_off_x_days(self, days: int) -> None:
+        if self.mock:
+            return
+        await self._execute_command(protocol.pack_turn_off_x_days(days))
+
+    async def sprinkle_station_x_for_y_minutes(
+        self, station: int, minutes: int
+    ) -> protocol.SolemStatus | None:
+        if self.mock:
+            return None
+        return await self._execute_command(
+            protocol.pack_sprinkle_station(station, minutes)
+        )
+
+    async def sprinkle_all_stations_for_y_minutes(
+        self, minutes: int
+    ) -> protocol.SolemStatus | None:
+        if self.mock:
+            return None
+        return await self._execute_command(protocol.pack_sprinkle_all_stations(minutes))
+
+    async def run_program_x(self, program: int) -> None:
+        if self.mock:
+            return
+        await self._execute_command(protocol.pack_run_program(program))
+
+    async def stop_manual_sprinkle(self) -> None:
+        if self.mock:
+            return
+        await self._execute_command(protocol.pack_stop_manual_sprinkle())

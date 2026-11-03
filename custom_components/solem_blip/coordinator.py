@@ -18,8 +18,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from homeassistant.util import dt as dt_util
 
-from solem_blip_ble import IrrigationProgram
-from solem_blip_ble.exceptions import InvalidSnapshot, UncertainWrite
+from .ble import IrrigationProgram
+from .ble.exceptions import InvalidSnapshot, UncertainWrite
 
 from .client_factory import (
     PersistentSolemClient,
@@ -70,6 +70,7 @@ from .bluetooth import async_get_connectable_device
 
 from .models import IrrigationController, IrrigationStation
 from .program_backup import ProgramBackupStore
+from .rainfall import RainfallManager
 from .station_names import StationNameManager
 from .activity import WateringActivity
 from .ble_health import note_cycle_outcome
@@ -182,6 +183,8 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self.active_program_num: int | None = None
         self.watering_origin: str | None = None
         self.irrigation_programs: dict[int, IrrigationProgram] = {}
+        self.programs_last_write: str | None = None
+        self.program_error: str | None = None
         self.program_backup = ProgramBackupStore(hass, config_entry.entry_id)
         self.station_name_manager = StationNameManager(
             hass, config_entry.entry_id, self.api
@@ -211,6 +214,7 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._schedule_ready_after = float("inf")
         self._schedule_gate = asyncio.Event()
         self.activity = WateringActivity(self)
+        self.rainfall = RainfallManager(self)
         self.stuck_adapter_detector = attach_stuck_adapter_detector(self)
 
         _LOGGER.info(
@@ -377,6 +381,7 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Build initial entity data without blocking setup on BLE availability."""
         await self.program_backup.async_load()
         await self.station_name_manager.async_load()
+        await self.rainfall.load()
         await self.activity.load()
         # Seed the display-name caches with the last successfully observed
         # onboard names so a restart (including an offline one) shows no
@@ -458,6 +463,8 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     async def async_update_data(self) -> list[dict[str, Any]]:
         try:
             data = await self.async_update_all_sensors()
+            await self.rainfall.maybe_apply()
+            data = await self.async_update_all_sensors(fetch_status=False)
             self._last_successful_poll_at = asyncio.get_running_loop().time()
             note_ble_recovery(self)
             note_cycle_outcome(self, degraded=False, reason="")
@@ -504,6 +511,7 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self,
         program_index: int,
         program: IrrigationProgram,
+        expected_revision: str | None = None,
     ) -> None:
         """Write one on-device irrigation program and refresh schedule data."""
         # The device day boundary follows Home Assistant's local time, so the
@@ -511,11 +519,18 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # otherwise fall back to the process time zone, which can put the
         # packed header date and countdown on a different day than the editor
         # preview shows.
-        self.irrigation_programs = await self.api.set_irrigation_program(
-            program_index,
-            program,
-            today=dt_util.now().date(),
-        )
+        try:
+            self.irrigation_programs = await self.api.set_irrigation_program(
+                program_index,
+                program,
+                today=dt_util.now().date(),
+                before_revision=expected_revision,
+            )
+        except Exception as err:
+            self.program_error = str(err) or type(err).__name__
+            raise
+        self.program_error = None
+        self.programs_last_write = dt_util.utcnow().isoformat()
         self.request_schedule_refresh()
         self.async_set_updated_data(await self.async_update_all_sensors(fetch_status=False))
         self.schedule_coordinator.async_set_updated_data(self.irrigation_programs)
