@@ -1,0 +1,83 @@
+"""BLE client for Solem BL-IP irrigation controllers."""
+
+from .client_persistent import PersistentSolemClient
+from .client_v2 import SolemRawBleSession, StatelessSolemClient
+from .const import DEFAULT_MAX_STATION_NUM, MAX_STATION_NUM
+from .exceptions import SolemConnectionError
+from .protocol import (
+    FirmwareVersion,
+    IrrigationConfigFragment,
+    IrrigationProgram,
+    StationNameFragment,
+    assemble_irrigation_programs,
+    irrigation_config_complete,
+    irrigation_program_write_mismatches,
+    is_command_notification,
+    normalize_config_notification,
+    pack_commit,
+    pack_get_firmware_version,
+    pack_get_irrigation_config,
+    pack_get_station_names,
+    pack_run_program,
+    pack_set_irrigation_program,
+    pack_set_time,
+    pack_sprinkle_all_stations,
+    pack_sprinkle_station,
+    pack_station_name,
+    pack_stop_manual_sprinkle,
+    pack_turn_off_permanent,
+    pack_turn_off_x_days,
+    pack_turn_on,
+    parse_battery_9v,
+    parse_firmware_version_response,
+    parse_intermediate_remaining,
+    parse_irrigation_config_fragment,
+    parse_remaining_seconds,
+    parse_station_name_fragment,
+    parse_status_notification,
+)
+from .station_names import StationNameSnapshot
+
+# Back-compat alias used by Home Assistant integrations
+APIConnectionError = SolemConnectionError
+
+__all__ = [
+    "DEFAULT_MAX_STATION_NUM",
+    "MAX_STATION_NUM",
+    "PersistentSolemClient",
+    "StatelessSolemClient",
+    "SolemRawBleSession",
+    "SolemConnectionError",
+    "APIConnectionError",
+    "FirmwareVersion",
+    "IrrigationConfigFragment",
+    "IrrigationProgram",
+    "StationNameFragment",
+    "StationNameSnapshot",
+    "assemble_irrigation_programs",
+    "irrigation_config_complete",
+    "irrigation_program_write_mismatches",
+    "is_command_notification",
+    "normalize_config_notification",
+    "pack_commit",
+    "pack_get_firmware_version",
+    "pack_get_irrigation_config",
+    "pack_get_station_names",
+    "pack_run_program",
+    "pack_set_irrigation_program",
+    "pack_set_time",
+    "pack_sprinkle_all_stations",
+    "pack_sprinkle_station",
+    "pack_station_name",
+    "pack_stop_manual_sprinkle",
+    "pack_turn_off_permanent",
+    "pack_turn_off_x_days",
+    "pack_turn_on",
+    "parse_battery_9v",
+    "parse_firmware_version_response",
+    "parse_intermediate_remaining",
+    "parse_irrigation_config_fragment",
+    "parse_remaining_seconds",
+    "parse_station_name_fragment",
+    "parse_status_notification",
+]

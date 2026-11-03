@@ -8,7 +8,7 @@ import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-from solem_blip_ble.exceptions import SolemConnectionError
+from custom_components.solem_blip.ble.exceptions import SolemConnectionError
 
 from custom_components.solem_blip import RuntimeData
 from custom_components.solem_blip.const import DOMAIN
@@ -112,7 +112,7 @@ async def test_probe_reports_b_name_failure_verdict(
     """A works, B's name read fails: the verdict names the commit trigger."""
     coordinator, device_id = await _setup_probe_target(hass, mock_config_entry)
 
-    from solem_blip_ble.exceptions import SolemConnectionError
+    from custom_components.solem_blip.ble.exceptions import SolemConnectionError
 
     clients: list[MagicMock] = []
 

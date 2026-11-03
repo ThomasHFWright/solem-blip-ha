@@ -15,6 +15,7 @@
   ],
   "config_flow": true,
   "dependencies": [
+    "bluetooth",
     "bluetooth_adapters"
   ],
   "documentation": "https://github.com/beelzetron/solem-blip-ha",
@@ -22,9 +23,7 @@
   "integration_type": "device",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/beelzetron/solem-blip-ha/issues",
-  "requirements": [
-    "solem-blip-ble==0.4.0"
-  ],
+  "requirements": [],
   "single_config_entry": false,
   "ssdp": [],
   "version": "1.4.0",

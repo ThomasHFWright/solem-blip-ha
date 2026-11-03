@@ -7,9 +7,7 @@ name = "solem-blip-ha"
 version = "1.4.0"
 description = "Home Assistant integration for Solem BL-IP irrigation controllers"
 requires-python = ">=3.14"
-dependencies = [
-    "solem-blip-ble==0.4.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
@@ -34,6 +32,11 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "--cov=custom_components.solem_blip --cov-fail-under=95 --cov-report=term-missing"
+
+[tool.coverage.run]
+# The vendored transport is validated by its upstream suite plus focused local
+# resilience tests; integration coverage remains comparable across upgrades.
+omit = ["custom_components/solem_blip/ble/*"]
 
 [tool.uv]
 environments = ["python_full_version >= '3.14.2'"]

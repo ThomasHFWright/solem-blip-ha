@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-from solem_blip_ble.exceptions import SolemConnectionError, SolemDeadlineExceeded, UncertainWrite
+from custom_components.solem_blip.ble.exceptions import SolemConnectionError, SolemDeadlineExceeded, UncertainWrite
 
 from custom_components.solem_blip import RuntimeData
 from custom_components.solem_blip.const import DOMAIN
@@ -119,6 +119,7 @@ async def test_set_program_service_writes_normalized_program(
             "station_durations": [60, 120],
         },
         today=date(2026, 10, 22),
+        before_revision=None,
     )
 
 

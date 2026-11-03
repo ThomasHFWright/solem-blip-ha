@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
-    from solem_blip_ble import IrrigationProgram
+    from .ble import IrrigationProgram
 
 _MAX_LOOKAHEAD_DAYS = 14
 

@@ -8,8 +8,8 @@ from typing import Any, cast
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
-from solem_blip_ble import IrrigationProgram
-from solem_blip_ble.snapshot import InvalidSnapshot, ProgramSnapshot
+from .ble import IrrigationProgram
+from .ble.snapshot import InvalidSnapshot, ProgramSnapshot
 
 from .const import DOMAIN
 

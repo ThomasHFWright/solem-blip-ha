@@ -235,7 +235,7 @@ async def test_rename_station_refreshes_cache_to_verified_snapshot(
     mock_solem_client: MagicMock,
 ) -> None:
     """The editor's verified readback updates the cache in the same flow."""
-    from solem_blip_ble.station_names import StationNameSnapshot
+    from custom_components.solem_blip.ble.station_names import StationNameSnapshot
 
     def _snapshot(num: int = 2) -> StationNameSnapshot:
         return StationNameSnapshot(

@@ -40,14 +40,16 @@
       "stale_station_name": "I nomi sul dispositivo sono cambiati da quando hai aperto l'editor. Riapri l'editor e riprova.",
       "station_name_busy": "Il controller è occupato o non supporta la rinomina in questo momento.",
       "station_name_uncertain": "L'esito dell'ultimo salvataggio è sconosciuto. Verifica i nomi attuali e confermali per continuare.",
-      "station_name_failed": "Lettura o scrittura dei nomi delle uscite non riuscita."
+      "station_name_failed": "Lettura o scrittura dei nomi delle uscite non riuscita.",
+      "rainfall_baseline": "Aggiorna il controller e conferma i budget normali."
     },
     "step": {
       "init": {
         "menu_options": {
           "settings": "Opzioni integrazione",
           "program_select": "Modifica programma sul dispositivo",
-          "station_select": "Rinomina uscite"
+          "station_select": "Rinomina uscite",
+          "rainfall": "Regolazione pioggia"
         },
         "description": "Modifica polling, opzioni BLE e programmi sul dispositivo.",
         "title": "Opzioni Solem BL-IP"
@@ -62,6 +64,22 @@
         },
         "description": "Modifica polling e opzioni BLE.",
         "title": "Opzioni Solem BL-IP"
+      },
+      "rainfall": {
+        "title": "Regolazione pioggia",
+        "description": "Regola i budget dei programmi integrati usando un sensore di pioggia recente.",
+        "data": {
+          "sensor": "Sensore pioggia accumulata",
+          "target_mm": "Obiettivo pioggia (mm)",
+          "max_age_minutes": "Età massima del sensore (minuti)",
+          "programs": "Programmi prato",
+          "automatic": "Applica automaticamente",
+          "timing": "Orario del controllo",
+          "whole_controller_delay": "Consenti una sospensione temporanea dell'intero controller",
+          "baseline_0": "Budget normale programma A (%)",
+          "baseline_1": "Budget normale programma B (%)",
+          "baseline_2": "Budget normale programma C (%)"
+        }
       },
       "program_select": {
         "data": {

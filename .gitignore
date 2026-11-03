@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.devtools/
+DEVICE_PROGRAMS_PLAN.md
 
 # Local artifacts
 .DS_Store

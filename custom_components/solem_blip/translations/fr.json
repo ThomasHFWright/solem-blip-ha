@@ -40,14 +40,16 @@
       "stale_station_name": "Les noms sur l'appareil ont changé depuis l'ouverture de l'éditeur. Rouvrez l'éditeur et réessayez.",
       "station_name_busy": "Le contrôleur est occupé ou ne prend pas en charge le renommage pour le moment.",
       "station_name_uncertain": "L'issue de la dernière sauvegarde est inconnue. Vérifiez les noms actuels et confirmez-les pour continuer.",
-      "station_name_failed": "Échec de lecture ou d'écriture des noms des sorties."
+      "station_name_failed": "Échec de lecture ou d'écriture des noms des sorties.",
+      "rainfall_baseline": "Actualisez le contrôleur et confirmez les budgets normaux."
     },
     "step": {
       "init": {
         "menu_options": {
           "settings": "Options de l'intégration",
           "program_select": "Modifier un programme sur l'appareil",
-          "station_select": "Renommer les sorties"
+          "station_select": "Renommer les sorties",
+          "rainfall": "Ajustement selon la pluie"
         },
         "description": "Réglez l'interrogation, les options Bluetooth et les programmes enregistrés sur l'appareil.",
         "title": "Options Solem BL-IP"
@@ -62,6 +64,22 @@
         },
         "description": "Réglez l'interrogation et les options Bluetooth.",
         "title": "Options Solem BL-IP"
+      },
+      "rainfall": {
+        "title": "Ajustement selon la pluie",
+        "description": "Ajuste les budgets des programmes intégrés à partir d'un capteur de pluie récent.",
+        "data": {
+          "sensor": "Capteur de pluie cumulée",
+          "target_mm": "Objectif de pluie (mm)",
+          "max_age_minutes": "Âge maximal du capteur (minutes)",
+          "programs": "Programmes de pelouse",
+          "automatic": "Appliquer automatiquement",
+          "timing": "Moment de la vérification",
+          "whole_controller_delay": "Autoriser une suspension temporaire de tout le contrôleur",
+          "baseline_0": "Budget normal du programme A (%)",
+          "baseline_1": "Budget normal du programme B (%)",
+          "baseline_2": "Budget normal du programme C (%)"
+        }
       },
       "program_select": {
         "data": {

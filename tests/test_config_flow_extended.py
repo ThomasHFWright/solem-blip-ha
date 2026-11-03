@@ -25,6 +25,7 @@ from custom_components.solem_blip.config_flow import (
     CannotConnectSlots,
     MENU_EDIT_PROGRAM,
     MENU_EDIT_STATION_NAMES,
+    MENU_RAINFALL,
     MENU_SETTINGS,
     PERIODIC_SECTION,
     SolemConfigFlow,
@@ -50,12 +51,12 @@ from custom_components.solem_blip.const import (
 from custom_components.solem_blip import config_flow as config_flow_module
 from custom_components.solem_blip.schedule import next_start_datetime
 from custom_components.solem_blip.services import _SET_PROGRAM_SCHEMA
-from solem_blip_ble import IrrigationProgram, SolemConnectionError
-from solem_blip_ble.protocol import (
+from custom_components.solem_blip.ble import IrrigationProgram, SolemConnectionError
+from custom_components.solem_blip.ble.protocol import (
     normalize_irrigation_program_for_write,
     period_start_to_synchro,
 )
-from solem_blip_ble.exceptions import InvalidSnapshot
+from custom_components.solem_blip.ble.exceptions import InvalidSnapshot
 from contextlib import contextmanager
 from tests.conftest import MOCK_IRRIGATION_PROGRAMS
 
@@ -606,6 +607,7 @@ async def test_options_flow_shows_menu(
         MENU_SETTINGS,
         MENU_EDIT_PROGRAM,
         MENU_EDIT_STATION_NAMES,
+        MENU_RAINFALL,
     ]
 
 
@@ -627,6 +629,44 @@ def test_options_flow_menu_translations_exist(
     assert menu_options[MENU_SETTINGS]
     assert menu_options[MENU_EDIT_PROGRAM]
     assert menu_options[MENU_EDIT_STATION_NAMES]
+    assert menu_options[MENU_RAINFALL]
+
+
+@pytest.mark.asyncio
+async def test_options_flow_rainfall_form_and_save(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, coordinator
+) -> None:
+    """Rainfall settings protect a freshly read onboard baseline."""
+    mock_config_entry.add_to_hass(hass)
+    coordinator.irrigation_programs = dict(MOCK_IRRIGATION_PROGRAMS)
+    coordinator.refresh_irrigation_programs = AsyncMock()
+    mock_config_entry.runtime_data = RuntimeData(coordinator)
+    handler = SolemOptionsFlowHandler()
+    with patch.object(
+        SolemOptionsFlowHandler,
+        "config_entry",
+        new_callable=PropertyMock,
+        return_value=mock_config_entry,
+    ):
+        form = await handler.async_step_rainfall()
+        result = await handler.async_step_rainfall(
+            {
+                "sensor": "sensor.rain",
+                "target_mm": 4,
+                "max_age_minutes": 60,
+                "programs": ["0"],
+                "automatic": True,
+                "timing": "before_program",
+                "whole_controller_delay": True,
+                "baseline_0": 100,
+            }
+        )
+
+    assert form["type"] == "form"
+    assert form["step_id"] == "rainfall"
+    assert result["type"] == "create_entry"
+    assert result["data"]["rainfall"]["baselines"] == {"0": 100}
+    assert result["data"]["rainfall"]["fingerprints"]["0"]
 
 
 def test_options_flow_uses_automatic_reload() -> None:
@@ -797,6 +837,8 @@ async def test_options_flow_program_select_continues_to_editor(
     coordinator._irrigation_active = False
     coordinator._is_watering = False
     coordinator.set_irrigation_program = AsyncMock()
+    coordinator.refresh_irrigation_programs = AsyncMock()
+    coordinator.api.last_snapshot = SimpleNamespace(revision="fresh")
     mock_config_entry.runtime_data = RuntimeData(coordinator)
     handler = SolemOptionsFlowHandler()
     with patch.object(

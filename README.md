@@ -7,7 +7,9 @@
 
 Minimal Home Assistant integration for the Solem **BL-IP** Bluetooth irrigation controller.
 
-This is a **separate project** focused on BLE status, battery monitoring, manual control, and editing the controller's on-device programs. Home Assistant scheduling helpers, rain math, and the Solem Schedule Card are **not** included. If you want the full scheduler integration, use [Henrique Craveiro's original project](https://github.com/hcraveiro/Home-Assistant-Solem-Bluetooth-Watering-Controller).
+This integration keeps watering schedules on the controller. Home Assistant can
+edit those programs and optionally adjust selected program budgets from a fresh
+rolling rainfall total, but it does not duplicate them with an HA watering timer.
 
 Requires Home Assistant **2026.3.0** or newer, the first Home Assistant release running on Python 3.14.
 
@@ -28,8 +30,10 @@ Requires Home Assistant **2026.3.0** or newer, the first Home Assistant release 
 - Program run detection (`0x44` status) with per-program running binary sensors
 - Controller status attributes: active program, program name, watering origin
 - Daily controller RTC synchronization after a successful BLE poll
+- Optional rainfall discount for explicitly selected onboard programs, with
+  configurable normal budgets and a guarded whole-controller rain delay
 - Repair issue when Bluetooth polling fails repeatedly
-- Uses the [`solem-blip-ble`](https://pypi.org/project/solem-blip-ble/) library via Home Assistant Bluetooth
+- Bundles the MIT-licensed Solem BLE transport and uses Home Assistant Bluetooth
 
 This integration supports the original Solem BL-IP controller running firmware 5.x.
 BL-IP V2 controllers running firmware 6.x are not supported.
@@ -56,9 +60,11 @@ _or_
 
 Setup asks only for the **Bluetooth controller** and **number of stations**.
 
-### BLE dependency
+### BLE transport
 
-Home Assistant installs the `solem-blip-ble` version pinned by the integration manifest automatically. Protocol notes: [solem-blip-ble docs](https://github.com/beelzetron/solem-blip-ble/blob/main/docs/ble_protocol.md).
+The integration bundles the audited `solem-blip-ble` 0.4.0 transport so its
+connection cleanup and protocol changes are released with the integration.
+Upstream protocol notes remain available in the [solem-blip-ble docs](https://github.com/beelzetron/solem-blip-ble/blob/main/docs/ble_protocol.md).
 
 ## Entities (example: 6 stations)
 
@@ -111,63 +117,18 @@ action:
 
 While watering, check **Controller status** attributes: `watering_origin: program` and `active_program_name` match the running binary.
 
-## Scheduling with Home Assistant
+## Onboard scheduling and rainfall
 
-Use native automations (or the HA Scheduler integration) instead of built-in irrigation logic.
+Configure each A/B/C schedule on the device through the integration's Configure
+menu. The controller remains responsible for starting and stopping watering when
+Home Assistant, Bluetooth, or the network is unavailable.
 
-### Daily watering at a fixed time
-
-```yaml
-alias: Water lawn station 1
-trigger:
-  - platform: time
-    at: "06:00:00"
-condition:
-  - condition: state
-    entity_id: sensor.solem_blip_aabbccddeeff_station_1_status
-    state: "inactive"
-action:
-  - action: button.press
-    target:
-      entity_id: button.solem_blip_aabbccddeeff_sprinkle_station_1
-```
-
-Set **Irrigation manual duration** (`number.*_irrigation_manual_duration`) to control how long each station valve or sprinkle button runs.
-
-### Skip when rain is forecast
-
-```yaml
-alias: Water station 1 unless rain forecast
-trigger:
-  - platform: time
-    at: "06:00:00"
-action:
-  - action: weather.get_forecasts
-    target:
-      entity_id: weather.home
-    data:
-      type: daily
-    response_variable: daily
-  - condition: template
-    value_template: "{{ daily['weather.home'].forecast[0].precipitation | float(0) < 1 }}"
-  - action: button.press
-    target:
-      entity_id: button.solem_blip_aabbccddeeff_sprinkle_station_1
-```
-
-Adjust entity IDs and thresholds for your weather integration and layout.
-
-### Skip while raining
-
-```yaml
-condition:
-  - condition: state
-    entity_id: weather.home
-    state: "rainy"
-    attribute: condition
-```
-
-Or use a rain-rate sensor / binary rain sensor from your weather stack.
+The optional rainfall adjustment uses an existing rolling accumulated sensor in
+millimetres. It writes a percentage of an explicitly confirmed normal baseline;
+it never starts watering. Missing, restored, stale, non-millimetre, or invalid
+rainfall data leaves the controller's last confirmed settings unchanged. A full
+skip uses the controller's expiring delay only when that whole-controller effect
+has been enabled and no unselected active program would also be paused.
 
 ## Brand icon
 
@@ -194,13 +155,14 @@ From the integration **Configure** menu:
 - **Edit on-device program** — update one controller program (A/B/C), including
   start times and station durations in minutes. Loaded program names appear in
   the selector, and loaded station names appear in duration field labels.
+- **Rainfall adjustment** — choose the rolling rainfall sensor, target,
+  freshness limit, selected lawn programs, normal budgets, and check timing.
 
 The integration polls BLE status every 60 seconds by default and refreshes the
 schedule stored on the controller separately every hour. Failed schedule reads
-retry every 15 minutes without delaying status updates. The Configure menu can
-write the controller's on-device programs. Home Assistant automations or another
-scheduler are still recommended for weather-aware schedules and other logic that
-does not live on the controller.
+retry every 15 minutes without delaying status updates. The Configure menu writes
+the controller's on-device programs; it does not create a second Home Assistant
+watering schedule.
 
 ### Restore programs after a battery replacement
 
@@ -253,8 +215,8 @@ device removal after repeated polling failures indicate that the controller is s
 ## Troubleshooting
 
 - Avoid using mobile apps while Home Assistant is actively connected to the controller.
-  When **Release BLE connection after each status poll** is enabled, other BLE
-  clients can use the controller between Home Assistant polling connections.
+  Leave **Hold the BLE connection between polls** disabled when other BLE clients
+  need to use the controller between Home Assistant polling connections.
 - Add a Bluetooth proxy closer to the controller if discovery is intermittent.
 - If polling fails repeatedly, open **Settings → System → Repairs** and follow the Bluetooth unavailable issue for the controller.
 - Use the integration diagnostics download to inspect availability, battery state,

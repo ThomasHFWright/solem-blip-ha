@@ -40,7 +40,8 @@
       "stale_station_name": "The onboard names changed since the editor was opened. Reopen the editor and try again.",
       "station_name_busy": "The controller is busy or does not support renaming right now.",
       "station_name_uncertain": "The outcome of the last save is unknown. Review the current names and confirm them to continue.",
-      "station_name_failed": "Failed to read or write the onboard station names."
+      "station_name_failed": "Failed to read or write the onboard station names.",
+      "rainfall_baseline": "Refresh the controller and confirm that each normal baseline matches its current or last managed budget."
     },
     "abort": {
       "not_loaded": "The integration is not loaded yet.",
@@ -51,7 +52,8 @@
         "menu_options": {
           "settings": "Integration options",
           "program_select": "Edit on-device program",
-          "station_select": "Rename outputs"
+          "station_select": "Rename outputs",
+          "rainfall": "Rainfall adjustment"
         },
         "description": "Adjust polling, BLE options, and on-device programs.",
         "title": "Solem BL-IP options"
@@ -81,6 +83,22 @@
         },
         "description": "Adjust polling and BLE options.",
         "title": "Solem BL-IP options"
+      },
+      "rainfall": {
+        "title": "Rainfall adjustment",
+        "description": "Adjust selected onboard program budgets from a fresh rolling rainfall sensor. Home Assistant does not schedule watering.",
+        "data": {
+          "sensor": "Rolling rainfall sensor",
+          "target_mm": "Rainfall target (mm)",
+          "max_age_minutes": "Maximum sensor age (minutes)",
+          "programs": "Lawn programs",
+          "automatic": "Apply automatically",
+          "timing": "Check timing",
+          "whole_controller_delay": "Allow an expiring whole-controller delay for a complete skip",
+          "baseline_0": "Program A normal budget (%)",
+          "baseline_1": "Program B normal budget (%)",
+          "baseline_2": "Program C normal budget (%)"
+        }
       },
       "program_select": {
         "data": {
@@ -293,6 +311,9 @@
     },
     "refresh_programs_failed": {
       "message": "Failed to refresh irrigation programs from the controller."
+    },
+    "apply_rainfall_failed": {
+      "message": "Failed to apply the rainfall adjustment; the controller retained its last confirmed settings."
     },
     "update_program_backup_failed": {
       "message": "Failed to update the protected program backup from the controller."
