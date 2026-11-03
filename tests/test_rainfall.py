@@ -1,6 +1,6 @@
 """Rainfall discounts change onboard settings, never schedule watering."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -25,6 +25,19 @@ def test_discount(rain, expected):
 def test_invalid_totals(rain, target):
     with pytest.raises(ValueError):
         fraction(rain, target)
+
+
+def test_controller_owned_date_does_not_invalidate_baseline() -> None:
+    program = {
+        "cycle": 0,
+        "controller_date": date(2026, 11, 3),
+        "period_start_date": None,
+        "water_budget": 100,
+        "start_times": [180, None],
+    }
+    previous = program_fingerprint(program)
+    program["controller_date"] = date(2026, 11, 4)
+    assert program_fingerprint(program) == previous
 
 
 @pytest.fixture

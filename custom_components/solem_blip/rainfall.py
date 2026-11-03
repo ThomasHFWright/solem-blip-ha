@@ -36,7 +36,11 @@ def fraction(rain_mm: float, target_mm: float) -> float:
 
 def program_fingerprint(program: dict[str, Any]) -> str:
     """Protect schedule edits while ignoring the budget managed here."""
-    ignored = {"water_budget"}
+    # controller_date is controller-owned metadata which changes daily and was
+    # not present in the pre-1.4 BLE model. It is neither editable nor part of
+    # the watering schedule, so including it would invalidate every migrated
+    # baseline and then invalidate it again at midnight.
+    ignored = {"controller_date", "water_budget"}
     if program.get("cycle") in (0, 1, 2, 3):
         ignored.add("period_start_date")
     protected = {key: value for key, value in program.items() if key not in ignored}
@@ -74,7 +78,11 @@ class RainfallManager:
         self.started = dt_util.utcnow()
         self.next_check: datetime = self.started
         self.state: dict[str, Any] = {}
-        self.reason = "disabled"
+        self.reason = (
+            "Waiting for next selected program"
+            if self.options.get("automatic")
+            else "disabled"
+        )
         self._lock = asyncio.Lock()
         self._automatic_lock = asyncio.Lock()
 
