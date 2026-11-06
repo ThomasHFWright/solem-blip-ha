@@ -797,6 +797,8 @@ async def test_options_flow_program_select_continues_to_editor(
     coordinator._irrigation_active = False
     coordinator._is_watering = False
     coordinator.set_irrigation_program = AsyncMock()
+    coordinator.refresh_irrigation_programs = AsyncMock()
+    coordinator.api.last_snapshot = SimpleNamespace(revision="fresh")
     mock_config_entry.runtime_data = RuntimeData(coordinator)
     handler = SolemOptionsFlowHandler()
     with patch.object(
@@ -847,6 +849,7 @@ async def test_options_flow_program_edit_writes_program(
     mock_config_entry.runtime_data = RuntimeData(coordinator)
     handler = SolemOptionsFlowHandler()
     handler._selected_program_index = 1
+    handler._program_revision = "editor-revision"
     with patch.object(
         SolemOptionsFlowHandler,
         "config_entry",
@@ -859,6 +862,9 @@ async def test_options_flow_program_edit_writes_program(
     coordinator.set_irrigation_program.assert_awaited_once()
     program_index, program = coordinator.set_irrigation_program.await_args.args
     assert program_index == 1
+    assert coordinator.set_irrigation_program.await_args.kwargs == {
+        "expected_revision": "editor-revision"
+    }
     assert program["name"] == "Vasi"
     assert program["cycle"] == 4
     assert program["week_days"] == 0x05
