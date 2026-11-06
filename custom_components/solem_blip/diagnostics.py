@@ -83,5 +83,8 @@ async def async_get_config_entry_diagnostics(
             "program_count": len(coordinator.irrigation_programs),
             "retry_after": coordinator._irrigation_config_retry_after,
             "refresh_after": coordinator._irrigation_config_refresh_after,
+            "last_write": coordinator.programs_last_write,
+            "error": coordinator.program_error,
+            "write": dict(coordinator.api.program_write_diagnostics),
         },
     }

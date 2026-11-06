@@ -46,6 +46,9 @@ async def test_diagnostics_redact_mac_and_include_runtime_state(
     coordinator._program_display_name.return_value = "Programma C"
     coordinator._irrigation_config_retry_after = 3.0
     coordinator._irrigation_config_refresh_after = 4.0
+    coordinator.programs_last_write = "2026-11-06T10:00:00+00:00"
+    coordinator.program_error = None
+    coordinator.api.program_write_diagnostics = {"phase": "verified"}
     mock_config_entry.runtime_data = RuntimeData(coordinator)
 
     result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
@@ -67,3 +70,6 @@ async def test_diagnostics_redact_mac_and_include_runtime_state(
     assert result["metadata_retry_after"]["station_names"] == 2.0
     assert result["metadata_task"] == {"active": True, "finished": False}
     assert result["schedule_read"]["program_count"] == 2
+    assert result["schedule_read"]["last_write"] == "2026-11-06T10:00:00+00:00"
+    assert result["schedule_read"]["error"] is None
+    assert result["schedule_read"]["write"] == {"phase": "verified"}

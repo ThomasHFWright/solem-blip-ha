@@ -113,6 +113,11 @@ async def test_controller_status_sensor_exposes_program_attributes(
         "active_program_name": "Programma C",
         "watering_origin": "program",
         "watering_activity": {"current": None, "history": []},
+        "programs_last_read": None,
+        "programs_last_write": None,
+        "program_revision": None,
+        "program_write_uncertain": False,
+        "program_error": None,
         "controller_off_mode": "temporary",
         "controller_off_days_remaining": 3,
     }

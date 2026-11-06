@@ -147,6 +147,8 @@ def create_mock_solem_client(station_num: int = 2) -> MagicMock:
     client = MagicMock()
     client.max_station_num = station_num
     client.mock = True
+    client.last_snapshot = None
+    client.program_write_diagnostics = {}
     client.get_status = AsyncMock(return_value={
         "controller_state": "On",
         "controller_off_mode": "on",
