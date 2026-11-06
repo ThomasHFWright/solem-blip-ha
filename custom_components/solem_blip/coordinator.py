@@ -182,6 +182,8 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self.active_program_num: int | None = None
         self.watering_origin: str | None = None
         self.irrigation_programs: dict[int, IrrigationProgram] = {}
+        self.programs_last_write: str | None = None
+        self.program_error: str | None = None
         self.program_backup = ProgramBackupStore(hass, config_entry.entry_id)
         self.station_name_manager = StationNameManager(
             hass, config_entry.entry_id, self.api
@@ -512,12 +514,18 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # otherwise fall back to the process time zone, which can put the
         # packed header date and countdown on a different day than the editor
         # preview shows.
-        self.irrigation_programs = await self.api.set_irrigation_program(
-            program_index,
-            program,
-            today=dt_util.now().date(),
-            before_revision=expected_revision,
-        )
+        try:
+            self.irrigation_programs = await self.api.set_irrigation_program(
+                program_index,
+                program,
+                today=dt_util.now().date(),
+                before_revision=expected_revision,
+            )
+        except Exception as err:
+            self.program_error = str(err) or type(err).__name__
+            raise
+        self.program_error = None
+        self.programs_last_write = dt_util.utcnow().isoformat()
         self.request_schedule_refresh()
         self.async_set_updated_data(await self.async_update_all_sensors(fetch_status=False))
         self.schedule_coordinator.async_set_updated_data(self.irrigation_programs)

@@ -121,6 +121,8 @@ async def test_set_program_service_writes_normalized_program(
         today=date(2026, 10, 22),
         before_revision=None,
     )
+    assert coordinator.programs_last_write is not None
+    assert coordinator.program_error is None
 
 
 @pytest.mark.asyncio
@@ -238,7 +240,9 @@ async def test_set_program_service_wraps_write_failure(
     mock_solem_client: MagicMock,
 ) -> None:
     """BLE write errors are surfaced as service errors."""
-    _, device_id = await _setup_service_target(hass, mock_config_entry, mock_solem_client)
+    coordinator, device_id = await _setup_service_target(
+        hass, mock_config_entry, mock_solem_client
+    )
     mock_solem_client.set_irrigation_program = AsyncMock(side_effect=RuntimeError)
 
     with pytest.raises(HomeAssistantError):
@@ -254,6 +258,8 @@ async def test_set_program_service_wraps_write_failure(
             },
             blocking=True,
         )
+
+    assert coordinator.program_error == "RuntimeError"
 
 
 

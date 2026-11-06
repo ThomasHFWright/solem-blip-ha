@@ -85,6 +85,21 @@ class StateSensor(SolemSensorEntity):
         if self.coordinator.watering_origin is not None:
             attributes["watering_origin"] = self.coordinator.watering_origin
         attributes["watering_activity"] = self.coordinator.activity.state
+        attributes.update(
+            {
+                "programs_last_read": self.coordinator.program_backup.last_read,
+                "programs_last_write": self.coordinator.programs_last_write,
+                "program_revision": getattr(
+                    self.coordinator.api.last_snapshot, "revision", None
+                ),
+                "program_write_uncertain": bool(
+                    self.coordinator.program_backup.pending
+                    or self.coordinator.api.program_write_diagnostics.get("phase")
+                    in {"uncertain", "readback_mismatch"}
+                ),
+                "program_error": self.coordinator.program_error,
+            }
+        )
         attributes["controller_off_mode"] = self.coordinator.controller_off_mode
         if self.coordinator.controller_off_days_remaining is not None:
             attributes["controller_off_days_remaining"] = (
