@@ -85,6 +85,8 @@ class StateSensor(SolemSensorEntity):
         if self.coordinator.watering_origin is not None:
             attributes["watering_origin"] = self.coordinator.watering_origin
         attributes["watering_activity"] = self.coordinator.activity.state
+        attributes["rainfall_status"] = self.coordinator.rainfall.reason
+        attributes["rainfall"] = self.coordinator.rainfall.dashboard_state
         attributes["controller_off_mode"] = self.coordinator.controller_off_mode
         if self.coordinator.controller_off_days_remaining is not None:
             attributes["controller_off_days_remaining"] = (

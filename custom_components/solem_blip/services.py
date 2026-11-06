@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+SERVICE_APPLY_RAINFALL = "apply_rainfall"
 SERVICE_REFRESH_PROGRAMS = "refresh_programs"
 SERVICE_RESTORE_PROGRAMS = "restore_programs"
 SERVICE_RUN_NAME_READ_PROBE = "run_name_read_probe"
@@ -187,6 +188,22 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         )
         return {"result": result}
 
+    async def handle_apply_rainfall(call: ServiceCall) -> None:
+        coordinator = _coordinator_from_device(hass, call.data[ATTR_DEVICE_ID])
+        try:
+            await coordinator.rainfall.apply()
+        except Exception as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="apply_rainfall_failed",
+            ) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_APPLY_RAINFALL,
+        handle_apply_rainfall,
+        schema=_COMMON_SERVICE_SCHEMA,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_SET_PROGRAM,
@@ -221,6 +238,7 @@ def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_RESTORE_PROGRAMS,
         SERVICE_REFRESH_PROGRAMS,
         SERVICE_RUN_NAME_READ_PROBE,
+        SERVICE_APPLY_RAINFALL,
     ):
         if hass.services.has_service(DOMAIN, service):
             hass.services.async_remove(DOMAIN, service)

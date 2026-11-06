@@ -70,6 +70,7 @@ from .bluetooth import async_get_connectable_device
 
 from .models import IrrigationController, IrrigationStation
 from .program_backup import ProgramBackupStore
+from .rainfall import RainfallManager
 from .station_names import StationNameManager
 from .activity import WateringActivity
 from .ble_health import note_cycle_outcome
@@ -211,6 +212,7 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._schedule_ready_after = float("inf")
         self._schedule_gate = asyncio.Event()
         self.activity = WateringActivity(self)
+        self.rainfall = RainfallManager(self)
         self.stuck_adapter_detector = attach_stuck_adapter_detector(self)
 
         _LOGGER.info(
@@ -377,6 +379,7 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Build initial entity data without blocking setup on BLE availability."""
         await self.program_backup.async_load()
         await self.station_name_manager.async_load()
+        await self.rainfall.load()
         await self.activity.load()
         # Seed the display-name caches with the last successfully observed
         # onboard names so a restart (including an offline one) shows no
@@ -458,6 +461,8 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     async def async_update_data(self) -> list[dict[str, Any]]:
         try:
             data = await self.async_update_all_sensors()
+            await self.rainfall.maybe_apply()
+            data = await self.async_update_all_sensors(fetch_status=False)
             self._last_successful_poll_at = asyncio.get_running_loop().time()
             note_ble_recovery(self)
             note_cycle_outcome(self, degraded=False, reason="")
