@@ -57,6 +57,7 @@ from .const import (
 )
 from .config_entry import MyConfigEntry
 from .exceptions_map import flow_error_for_exception
+from .rainfall import RAIN_OPTIONS, program_fingerprint
 from .schedule import (
     format_duration,
     interval_phase_valid,
@@ -132,6 +133,7 @@ class _StartSlotSelector(TimeSelector):
 MENU_SETTINGS = "settings"
 MENU_EDIT_PROGRAM = "program_select"
 MENU_EDIT_STATION_NAMES = "station_select"
+MENU_RAINFALL = "rainfall"
 
 ATTR_ACCEPT_CURRENT = "accept_current"
 ATTR_STATION = "station"
@@ -552,7 +554,113 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
                 MENU_SETTINGS,
                 MENU_EDIT_PROGRAM,
                 MENU_EDIT_STATION_NAMES,
+                MENU_RAINFALL,
             ],
+        )
+
+    async def async_step_rainfall(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure guarded rainfall discounts from fresh onboard programs."""
+        current = self.config_entry.options.get(RAIN_OPTIONS, {})
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                coordinator = self._coordinator
+                if coordinator is None:
+                    raise ValueError("Integration is not loaded")
+                selected = user_input["programs"]
+                baselines = {
+                    key: int(user_input[f"baseline_{key}"]) for key in selected
+                }
+                fingerprints: dict[str, str] = {}
+                if selected:
+                    await coordinator.refresh_irrigation_programs()
+                    if coordinator.program_backup.pending:
+                        raise ValueError("Resolve the uncertain restore first")
+                    for key in selected:
+                        program = coordinator.irrigation_programs[int(key)]
+                        confirmed_discount = (
+                            baselines[key]
+                            == current.get("baselines", {}).get(key)
+                            and program["water_budget"]
+                            == coordinator.rainfall.state.get(
+                                "expected_budgets", {}
+                            ).get(key)
+                        )
+                        if (
+                            program["water_budget"] != baselines[key]
+                            and not confirmed_discount
+                        ):
+                            raise ValueError(
+                                "Normal budget must match current device settings"
+                            )
+                        fingerprints[key] = program_fingerprint(dict(program))
+                rainfall = {
+                    **user_input,
+                    "baselines": baselines,
+                    "fingerprints": fingerprints,
+                }
+                return self.async_create_entry(
+                    title="",
+                    data={**self.config_entry.options, RAIN_OPTIONS: rainfall},
+                )
+            except Exception:
+                errors["base"] = "rainfall_baseline"
+
+        fields: dict[Any, Any] = {
+            vol.Required("sensor", default=current.get("sensor", "")): selector(
+                {"entity": {"domain": "sensor"}}
+            ),
+            vol.Required(
+                "target_mm", default=current.get("target_mm", 4)
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000)),
+            vol.Required(
+                "max_age_minutes", default=current.get("max_age_minutes", 60)
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
+            vol.Required("programs", default=current.get("programs", [])): selector(
+                {
+                    "select": {
+                        "multiple": True,
+                        "options": [
+                            {"value": str(index), "label": f"Program {label}"}
+                            for index, label in enumerate(PROGRAM_LABELS)
+                        ],
+                    }
+                }
+            ),
+            vol.Required(
+                "automatic", default=current.get("automatic", False)
+            ): bool,
+            vol.Required(
+                "timing", default=current.get("timing", "hourly")
+            ): selector(
+                {
+                    "select": {
+                        "options": [
+                            {"value": "hourly", "label": "Hourly"},
+                            {
+                                "value": "before_program",
+                                "label": "15 minutes before each program's first start",
+                            },
+                        ]
+                    }
+                }
+            ),
+            vol.Required(
+                "whole_controller_delay",
+                default=current.get("whole_controller_delay", False),
+            ): bool,
+        }
+        for index in range(3):
+            fields[
+                vol.Required(
+                    f"baseline_{index}",
+                    default=current.get("baselines", {}).get(str(index), 100),
+                )
+            ] = vol.All(vol.Coerce(int), vol.Range(min=1, max=65535))
+        return self.async_show_form(
+            step_id="rainfall", data_schema=vol.Schema(fields), errors=errors
         )
 
     async def async_step_settings(

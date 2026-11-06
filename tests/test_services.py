@@ -18,6 +18,7 @@ from custom_components.solem_blip import RuntimeData
 from custom_components.solem_blip.const import DOMAIN
 from custom_components.solem_blip.coordinator import SolemCoordinator
 from custom_components.solem_blip.services import (
+    SERVICE_APPLY_RAINFALL,
     SERVICE_REFRESH_PROGRAMS,
     SERVICE_RESTORE_PROGRAMS,
     SERVICE_SET_PROGRAM,
@@ -199,18 +200,42 @@ async def test_refresh_programs_service_surfaces_read_failure(
 
 
 @pytest.mark.asyncio
+async def test_apply_rainfall_service_runs_guarded_adjustment(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_solem_client: MagicMock,
+) -> None:
+    """apply_rainfall resolves the controller and delegates to its manager."""
+    coordinator, device_id = await _setup_service_target(
+        hass, mock_config_entry, mock_solem_client
+    )
+    coordinator.rainfall.apply = AsyncMock()
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_APPLY_RAINFALL,
+        {"device_id": device_id},
+        blocking=True,
+    )
+
+    coordinator.rainfall.apply.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_services_register_once_and_unload(hass: HomeAssistant) -> None:
     """Service setup is idempotent and unload removes registered services."""
     await async_setup_services(hass)
     await async_setup_services(hass)
 
     assert hass.services.has_service(DOMAIN, SERVICE_SET_PROGRAM)
+    assert hass.services.has_service(DOMAIN, SERVICE_APPLY_RAINFALL)
     assert hass.services.has_service(DOMAIN, SERVICE_REFRESH_PROGRAMS)
     assert hass.services.has_service(DOMAIN, SERVICE_RESTORE_PROGRAMS)
 
     async_unload_services(hass)
 
     assert not hass.services.has_service(DOMAIN, SERVICE_SET_PROGRAM)
+    assert not hass.services.has_service(DOMAIN, SERVICE_APPLY_RAINFALL)
     assert not hass.services.has_service(DOMAIN, SERVICE_REFRESH_PROGRAMS)
     assert not hass.services.has_service(DOMAIN, SERVICE_RESTORE_PROGRAMS)
 
