@@ -20,6 +20,7 @@ async def test_diagnostics_redact_mac_and_include_runtime_state(
     """Diagnostics redact the configured MAC and expose useful coordinator state."""
     coordinator = MagicMock()
     coordinator.last_update_success = True
+    coordinator.api.cleanup_pending = True
     coordinator.firmware_version = "5.1.7"
     coordinator.num_stations = 6
     coordinator.battery_level = 4
@@ -57,6 +58,7 @@ async def test_diagnostics_redact_mac_and_include_runtime_state(
     assert result["program_names"]["A"] == "Programma A"
     assert result["program_names"]["C"] == "Programma C"
     assert result["last_update_success"] is True
+    assert result["bluetooth_cleanup_pending"] is True
     assert result["irrigation"]["is_watering"] is True
     assert result["irrigation"]["station"] == 2
     assert result["irrigation"]["active_program"] == 3
