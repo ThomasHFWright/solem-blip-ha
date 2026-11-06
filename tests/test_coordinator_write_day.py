@@ -54,3 +54,6 @@ async def test_set_irrigation_program_passes_ha_local_write_day(
     assert coordinator.api.set_irrigation_program.await_args.kwargs["today"] == date(
         2026, 10, 22
     )
+    assert coordinator.api.set_irrigation_program.await_args.kwargs[
+        "before_revision"
+    ] is None

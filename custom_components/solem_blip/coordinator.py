@@ -504,6 +504,7 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self,
         program_index: int,
         program: IrrigationProgram,
+        expected_revision: str | None = None,
     ) -> None:
         """Write one on-device irrigation program and refresh schedule data."""
         # The device day boundary follows Home Assistant's local time, so the
@@ -515,6 +516,7 @@ class SolemCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             program_index,
             program,
             today=dt_util.now().date(),
+            before_revision=expected_revision,
         )
         self.request_schedule_refresh()
         self.async_set_updated_data(await self.async_update_all_sensors(fetch_status=False))

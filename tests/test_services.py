@@ -119,6 +119,7 @@ async def test_set_program_service_writes_normalized_program(
             "station_durations": [60, 120],
         },
         today=date(2026, 10, 22),
+        before_revision=None,
     )
 
 

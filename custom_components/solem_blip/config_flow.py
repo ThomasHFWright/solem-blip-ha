@@ -523,6 +523,7 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
     """Handle integration options."""
 
     _selected_program_index: int = 0
+    _program_revision: str | None = None
     # Pending state for the preview-only confirm steps (issue #129): the
     # program parsed from the last submit, kept until the user confirms
     # (writes) or declines (fresh editor). Cleared on a fresh editor render.
@@ -618,26 +619,46 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Choose which on-device program to edit."""
+        schema = vol.Schema(
+            {
+                vol.Required(ATTR_PROGRAM, default=1): selector(
+                    {
+                        "select": {
+                            "options": self._program_select_options(
+                                self._coordinator
+                            ),
+                            "mode": "dropdown",
+                        }
+                    }
+                )
+            }
+        )
         if user_input is not None:
+            coordinator = self._coordinator
+            if coordinator is None:
+                return self.async_show_form(
+                    step_id="program_select",
+                    data_schema=schema,
+                    errors={"base": "not_loaded"},
+                )
+            try:
+                await coordinator.refresh_irrigation_programs()
+                snapshot = coordinator.api.last_snapshot
+                if snapshot is None:
+                    raise InvalidSnapshot("No complete program snapshot available")
+            except Exception:
+                return self.async_show_form(
+                    step_id="program_select",
+                    data_schema=schema,
+                    errors={"base": "set_program_failed"},
+                )
+            self._program_revision = snapshot.revision
             self._selected_program_index = int(user_input[ATTR_PROGRAM]) - 1
             return await self.async_step_program_edit()
 
         return self.async_show_form(
             step_id="program_select",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(ATTR_PROGRAM, default=1): selector(
-                        {
-                            "select": {
-                                "options": self._program_select_options(
-                                    self._coordinator
-                                ),
-                                "mode": "dropdown",
-                            }
-                        }
-                    )
-                }
-            ),
+            data_schema=schema,
         )
 
     async def async_step_program_edit(
@@ -935,7 +956,11 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
         assert coordinator is not None  # caller guarantees a loaded entry
         errors: dict[str, str] = {}
         try:
-            await coordinator.set_irrigation_program(program_index, program)
+            await coordinator.set_irrigation_program(
+                program_index,
+                program,
+                expected_revision=self._program_revision,
+            )
         except Exception:
             _LOGGER.exception(
                 "Failed to update Program %s from options flow",
@@ -948,6 +973,10 @@ class SolemOptionsFlowHandler(OptionsFlowWithReload):
             self._pending_program = None
             self._pending_program_index = None
             self._pending_warning = ""
+            try:
+                await coordinator.refresh_irrigation_programs()
+            except Exception:
+                pass
         else:
             return self.async_create_entry(
                 title="",
